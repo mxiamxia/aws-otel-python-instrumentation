@@ -178,6 +178,7 @@ def invoke_agent_h(query, session_id, agent_id, alias_id, enable_trace=False, se
                 print(f"Final answer in chunk is {agent_answer}")
                 return agent_answer
             elif 'trace' in event:
+                logger.info(json.dumps(event['trace'], indent=2))
                 trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
                 if 'observation' in trace_event:
                     observation_data = trace_event.get("observation", {})
