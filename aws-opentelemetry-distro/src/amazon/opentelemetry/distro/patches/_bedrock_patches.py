@@ -242,16 +242,17 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                 schema_url="https://opentelemetry.io/schemas/1.11.0",
             )
             event_stream = result['completion']
+            buffered_events = [event for event in event_stream]
             try:
                 i = 0
-                for event in event_stream:
+                for event in buffered_events:
                     i += 1
-                    if 'chunk' in event:
-                        data = event['chunk']['bytes']
-                        agent_answer = data.decode('utf8')
-                        print(f"Final answer is {agent_answer}")
+                    # if 'chunk' in event:
+                    #     data = event['chunk']['bytes']
+                    #     agent_answer = data.decode('utf8')
+                    #     print(f"Final answer is {agent_answer}")
 
-                    elif 'trace' in event:
+                    if 'trace' in event:
                         # print(json.dumps(event, indent=2))
 
                         trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
@@ -261,11 +262,18 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                         # ---------------- Handle modelInvocationInput ---------------- #
                         if 'modelInvocationInput' in trace_event:
                             model_input = trace_event.get("modelInvocationInput", {}).get("inferenceConfiguration", {})
+                            prompt_json_str = trace_event.get("modelInvocationInput", {}).get("text", {})
+                            # Parse the JSON string
+                            data = json.loads(prompt_json_str)
+
+                            # Extract the content from the messages array
+                            message_content = data['messages'][0]['content']
 
                             # Store extracted attributes for later use
                             prev_trace_event = {
                                 "temperature": model_input.get("temperature"),
-                                "top_p": model_input.get("topP")
+                                "top_p": model_input.get("topP"),
+                                "prompt_input": message_content
                             }
 
                         # ---------------- Handle modelInvocationOutput ---------------- #
@@ -273,14 +281,22 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             model_output = trace_event.get("modelInvocationOutput", {}).get("metadata", {}).get("usage",
                                                                                                                 {})
 
+                            model_output_content = trace_event.get("modelInvocationOutput", {}).get("rawResponse", {}).get("content",
+                                                                                                                {})
+
                             # Create a single child span that includes both input & output attributes
-                            with tracer.start_as_current_span("modelInvocation",
+                            with tracer.start_as_current_span("InvokeLlmModel",
                                                               context=trace.set_span_in_context(span)) as child_span:
 
                                 # Add previously stored input attributes
                                 if prev_trace_event.get("temperature") is not None:
                                     child_span.set_attribute("gen_ai.request.temperature",
                                                              prev_trace_event["temperature"])
+
+                                if prev_trace_event.get("prompt_input") is not None:
+                                    child_span.set_attribute("gen_ai.request.prompt", prev_trace_event["prompt_input"])
+                                if model_output_content is not None:
+                                    child_span.set_attribute("gen_ai.request.output", model_output_content)
 
                                 if prev_trace_event.get("top_p") is not None:
                                     child_span.set_attribute("gen_ai.request.top_p", prev_trace_event["top_p"])
@@ -327,51 +343,51 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             observation_data = trace_event.get("observation", {})
 
                             if observation_data.get("finalResponse"):
-                                with tracer.start_as_current_span("finalResponse",
+                                with tracer.start_as_current_span("FinalResponse",
                                                                   context=trace.set_span_in_context(
                                                                       span)) as child_span:
                                     final_resp = observation_data.get("finalResponse", {})
-                                    child_span.set_attribute("finalResponse",
+                                    child_span.set_attribute("gen_ai.agent.finalResponse",
                                                              final_resp.get("text"))
                                     child_span.set_attribute("aws.local.operation", "finalResponse")
 
                             elif prev_invocation_event:
                             # Create a single child span for invocationInput + observation
-                                with tracer.start_as_current_span("invokeFunction",
+                                with tracer.start_as_current_span("InvokeActionFunction",
                                                                   context=trace.set_span_in_context(span)) as child_span:
 
                                     if prev_invocation_event["type"] == "action_group":
                                         # Add actionGroupInvocationInput attributes
                                         if prev_invocation_event.get("actionGroupName") is not None:
-                                            child_span.set_attribute("action_group.name",
+                                            child_span.set_attribute("gen_ai.agent.action_group.name",
                                                                      prev_invocation_event["actionGroupName"])
 
                                         if prev_invocation_event.get("executionType") is not None:
-                                            child_span.set_attribute("action_group.execution_type",
+                                            child_span.set_attribute("gen_ai.agent.action_group.execution_type",
                                                                      prev_invocation_event["executionType"])
 
                                         if prev_invocation_event.get("function") is not None:
-                                            child_span.set_attribute("action_group.function",
+                                            child_span.set_attribute("gen_ai.agent.action_group.function",
                                                                      prev_invocation_event["function"])
 
                                         # Add actionGroupInvocationOutput text if present
                                         action_group_output = observation_data.get("actionGroupInvocationOutput", {})
                                         if "text" in action_group_output:
-                                            child_span.set_attribute("action_group.text", action_group_output["text"])
+                                            child_span.set_attribute("gen_ai.agent.action_group.output", action_group_output["text"])
                                         child_span.set_attribute("aws.local.operation", "funcInvocation")
 
                                     elif prev_invocation_event["type"] == "knowledge_base":
                                         # Add knowledgeBaseLookupInput attributes
                                         if prev_invocation_event.get("invocationType") is not None:
-                                            child_span.set_attribute("knowledge_base.invocation_type",
+                                            child_span.set_attribute("gen_ai.agent.knowledge_base.invocation_type",
                                                                      prev_invocation_event["invocationType"])
 
                                         if prev_invocation_event.get("knowledgeBaseId") is not None:
-                                            child_span.set_attribute("knowledge_base.id",
+                                            child_span.set_attribute("gen_ai.agent.knowledge_base.id",
                                                                      prev_invocation_event["knowledgeBaseId"])
 
                                         if prev_invocation_event.get("text") is not None:
-                                            child_span.set_attribute("knowledge_base.text", prev_invocation_event["text"])
+                                            child_span.set_attribute("gen_ai.agent.knowledge_base.output", prev_invocation_event["text"])
 
                                         # Add knowledgeBaseLookupOutput attributes if present
                                         knowledge_base_output = observation_data.get("knowledgeBaseLookupOutput", {})
@@ -383,15 +399,16 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                                 # Reset prev_invocation_event after using it
                                 prev_invocation_event = None
                         elif 'rationale' in trace_event:
-                            with tracer.start_as_current_span("modelReasoning",
+                            with tracer.start_as_current_span("LlmModelReasoning",
                                                               context=trace.set_span_in_context(span)) as child_span:
                                 rationale_data = trace_event.get("rationale", {})
                                 if rationale_data.get("text") is not None:
-                                    child_span.set_attribute("text", rationale_data.get("text"))
+                                    child_span.set_attribute("gen_ai.agent.reasoning.rationale", rationale_data.get("text"))
                                 child_span.set_attribute("aws.local.operation", "rationale")
 
             except Exception as e:
                     raise Exception("unexpected event.", e)
+            result['completion'] = buffered_events
 
 
 class _BedrockExtension(_AwsSdkExtension):

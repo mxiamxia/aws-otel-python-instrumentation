@@ -151,7 +151,7 @@ def create_lambda_role(agent_name, dynamodb_table_name):
     return lambda_iam_role
 
 
-def invoke_agent_h(query, session_id, agent_id, alias_id, enable_trace=False, session_state=None) -> str:
+def invoke_agent_h(query, session_id, agent_id, alias_id, enable_trace=False, session_state=None):
     end_session: bool = False
     if not session_state:
         session_state = {}
@@ -191,7 +191,6 @@ def invoke_agent_h(query, session_id, agent_id, alias_id, enable_trace=False, se
                 raise Exception("unexpected event.", event)
     except Exception as e:
         raise Exception("unexpected event.", e)
-    return "no result"
 
 
 def create_agent_role(agent_name, agent_foundation_model, kb_id=None):
@@ -386,7 +385,7 @@ def clean_up_resources(
 
 if __name__ == "__main__":
     session_id: str = str(uuid.uuid1())
-    query = "Can you show me my reservation? I am Min"
-    response = invoke_agent_helper(query, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
-    print(response)
+    query = "this is a test"
+    response = invoke_agent_h(query, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
+    print(f"the final response is {response}")
 
