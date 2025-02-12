@@ -246,7 +246,12 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                 i = 0
                 for event in event_stream:
                     i += 1
-                    if 'trace' in event:
+                    if 'chunk' in event:
+                        data = event['chunk']['bytes']
+                        agent_answer = data.decode('utf8')
+                        print(f"Final answer is {agent_answer}")
+
+                    elif 'trace' in event:
                         # print(json.dumps(event, indent=2))
 
                         trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
@@ -332,7 +337,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
 
                             elif prev_invocation_event:
                             # Create a single child span for invocationInput + observation
-                                with tracer.start_as_current_span(f"invokeFunction",
+                                with tracer.start_as_current_span("invokeFunction",
                                                                   context=trace.set_span_in_context(span)) as child_span:
 
                                     if prev_invocation_event["type"] == "action_group":
@@ -378,7 +383,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                                 # Reset prev_invocation_event after using it
                                 prev_invocation_event = None
                         elif 'rationale' in trace_event:
-                            with tracer.start_as_current_span("reasoning",
+                            with tracer.start_as_current_span("modelReasoning",
                                                               context=trace.set_span_in_context(span)) as child_span:
                                 rationale_data = trace_event.get("rationale", {})
                                 if rationale_data.get("text") is not None:

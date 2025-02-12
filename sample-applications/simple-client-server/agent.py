@@ -151,7 +151,7 @@ def create_lambda_role(agent_name, dynamodb_table_name):
     return lambda_iam_role
 
 
-def invoke_agent_helper(query, session_id, agent_id, alias_id, enable_trace=False, session_state=None):
+def invoke_agent_h(query, session_id, agent_id, alias_id, enable_trace=False, session_state=None) -> str:
     end_session: bool = False
     if not session_state:
         session_state = {}
@@ -167,29 +167,30 @@ def invoke_agent_helper(query, session_id, agent_id, alias_id, enable_trace=Fals
         sessionState=session_state
     )
 
-    if enable_trace:
-        pass
-
+    print(f"print agent id: {agent_id}")
 
     event_stream = agent_response['completion']
     try:
         for event in event_stream:
             if 'chunk' in event:
                 data = event['chunk']['bytes']
-                if enable_trace:
-                    # logger.info(f"Final answer ->\n{data.decode('utf8')}")
-                    pass
                 agent_answer = data.decode('utf8')
+                print(f"Final answer in chunk is {agent_answer}")
                 return agent_answer
-                # End event indicates that the request finished successfully
             elif 'trace' in event:
-                if enable_trace:
-                    logger.info(json.dumps(event['trace'], indent=2))
-                    pass
+                trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
+                if 'observation' in trace_event:
+                    observation_data = trace_event.get("observation", {})
+                    if observation_data.get("finalResponse"):
+                        final_resp = observation_data.get("finalResponse", {}).get("text")
+                        print(f"Final response in trace is {final_resp}")
+                        return final_resp
+
             else:
                 raise Exception("unexpected event.", event)
     except Exception as e:
         raise Exception("unexpected event.", e)
+    return "no result"
 
 
 def create_agent_role(agent_name, agent_foundation_model, kb_id=None):

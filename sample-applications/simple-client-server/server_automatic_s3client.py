@@ -3,7 +3,7 @@
 import uuid
 import time
 
-from agent import invoke_agent_helper
+from agent import invoke_agent_h
 import boto3
 from flask import Flask, request, jsonify, render_template
 
@@ -29,8 +29,10 @@ def invoke_agent():
     param = data.get('message', '')
     session_id: str = str(uuid.uuid1())
     # query = "Can you show me my reservation? I am Min"
-    response = invoke_agent_helper(param, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
+    response = invoke_agent_h(param, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
     time_spent = time.time() - start_time
+
+    print(f'agent response: {response}')
 
     # Assuming response is a string. If it's not, adjust accordingly.
     return jsonify({
