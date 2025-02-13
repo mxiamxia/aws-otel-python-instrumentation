@@ -27,7 +27,28 @@ def invoke_agent():
 
     data = request.json
     param = data.get('message', '')
-    session_id: str = str(uuid.uuid1())
+    # session_id: str = str(uuid.uuid1())
+    session_id = data.get('session_id', str(uuid.uuid1()))
+    # query = "Can you show me my reservation? I am Min"
+    response = invoke_agent_h(param, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
+    time_spent = time.time() - start_time
+
+    print(f'agent response: {response}')
+
+    # Assuming response is a string. If it's not, adjust accordingly.
+    return jsonify({
+        "response": response,
+        "time_spent": f"{time_spent:.2f} seconds"
+    })
+
+@app.route("/invoke_app_agent", methods=['POST'])
+def invoke_app_agent():
+    start_time = time.time()
+
+    data = request.json
+    param = data.get('message', '')
+    # session_id: str = str(uuid.uuid1())
+    session_id = data.get('session_id', str(uuid.uuid1()))
     # query = "Can you show me my reservation? I am Min"
     response = invoke_agent_h(param, session_id, 'R8BU8WVB8S', 'TSTALIASID', True)
     time_spent = time.time() - start_time

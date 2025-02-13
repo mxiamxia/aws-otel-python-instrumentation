@@ -7,8 +7,8 @@
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         #chatBox { height: 400px; border: 1px solid #ddd; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
-        #userInput { width: calc(100% - 70px); padding: 5px; }
-        #sendButton { width: 60px; }
+        #userInput { width: calc(100% - 220px); padding: 5px; }
+        #sendButton, #newSessionButton { width: 100px; margin-left: 5px; }
         .message { margin-bottom: 10px; }
         .user-message { text-align: right; }
         .agent-message { text-align: left; }
@@ -16,20 +16,65 @@
         .user-message .message-content { background-color: #007bff; color: white; }
         .agent-message .message-content { background-color: #f1f0f0; }
         .time-spent { font-size: 0.8em; color: #666; margin-top: 2px; }
+        #sessionId { font-size: 0.8em; color: #666; margin-top: 10px; }
+        #agentSelection { margin-bottom: 10px; }
     </style>
 </head>
 <body>
     <h1>Chat with Agent</h1>
+    <div id="agentSelection">
+        <input type="radio" id="restaurantAgent" name="agentType" value="restaurant" checked>
+        <label for="restaurantAgent">Restaurant Agent</label>
+        <input type="radio" id="appAgent" name="agentType" value="app">
+        <label for="appAgent">ApplicationSignals Agent</label>
+    </div>
     <div id="chatBox"></div>
     <input type="text" id="userInput" placeholder="Type your message here...">
     <button id="sendButton">Send</button>
+    <button id="newSessionButton">New Session</button>
+    <div id="sessionId"></div>
 
     <script>
+    document.addEventListener('DOMContentLoaded', function() {
         const chatBox = document.getElementById('chatBox');
         const userInput = document.getElementById('userInput');
         const sendButton = document.getElementById('sendButton');
+        const newSessionButton = document.getElementById('newSessionButton');
+        const sessionIdDisplay = document.getElementById('sessionId');
+        const restaurantAgentRadio = document.getElementById('restaurantAgent');
+        const appAgentRadio = document.getElementById('appAgent');
+
+        let sessionId;
+
+        function generateUUID1() {
+            let d = new Date().getTime();
+            let d2 = (performance && performance.now && (performance.now() * 1000)) || 0;
+            return 'xxxxxxxx-xxxx-1xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                let r = Math.random() * 16;
+                if (d > 0) {
+                    r = (d + r) % 16 | 0;
+                    d = Math.floor(d / 16);
+                } else {
+                    r = (d2 + r) % 16 | 0;
+                    d2 = Math.floor(d2 / 16);
+                }
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+        }
+
+        function updateSessionIdDisplay() {
+            if (sessionIdDisplay) {
+                sessionIdDisplay.textContent = `Current Session ID: ${sessionId}`;
+            } else {
+                console.error('Session ID display element not found');
+            }
+        }
 
         function addMessage(content, isUser, timeSpent = null) {
+            if (!chatBox) {
+                console.error('Chat box element not found');
+                return;
+            }
             const messageDiv = document.createElement('div');
             messageDiv.className = isUser ? 'message user-message' : 'message agent-message';
 
@@ -50,17 +95,25 @@
         }
 
         function sendMessage() {
+            console.log('sendMessage function called');
+            if (!userInput) {
+                console.error('User input element not found');
+                return;
+            }
             const message = userInput.value.trim();
             if (message) {
+                console.log('Sending message:', message);
                 addMessage(message, true);
                 userInput.value = '';
 
-                fetch('/invoke_agent', {
+                const endpoint = restaurantAgentRadio.checked ? '/invoke_agent' : '/invoke_app_agent';
+
+                fetch(endpoint, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({message: message}),
+                    body: JSON.stringify({message: message, session_id: sessionId}),
                 })
                 .then(response => {
                     if (!response.ok) {
@@ -76,15 +129,48 @@
                     console.error('Error:', error);
                     addMessage('An error occurred: ' + error.message, false);
                 });
+            } else {
+                console.log('Message is empty');
             }
         }
 
-        sendButton.addEventListener('click', sendMessage);
-        userInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
+        if (sendButton) {
+            sendButton.addEventListener('click', function() {
+                console.log('Send button clicked');
                 sendMessage();
-            }
-        });
+            });
+        } else {
+            console.error('Send button not found');
+        }
+
+        if (userInput) {
+            userInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    console.log('Enter key pressed');
+                    sendMessage();
+                }
+            });
+        } else {
+            console.error('User input element not found');
+        }
+
+        if (newSessionButton) {
+            newSessionButton.addEventListener('click', function() {
+                console.log('New Session button clicked');
+                sessionId = generateUUID1();
+                updateSessionIdDisplay();
+                addMessage('New session started.', false);
+            });
+        } else {
+            console.error('New session button not found');
+        }
+
+        // Initialize session
+        sessionId = generateUUID1();
+        updateSessionIdDisplay();
+
+        console.log('Script loaded successfully');
+    });
     </script>
 </body>
 </html>

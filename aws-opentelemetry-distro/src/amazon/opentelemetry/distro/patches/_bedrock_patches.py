@@ -264,7 +264,9 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             model_input = trace_event.get("modelInvocationInput", {}).get("inferenceConfiguration", {})
                             prompt_json_str = trace_event.get("modelInvocationInput", {}).get("text", {})
                             # Parse the JSON string
-                            data = json.loads(prompt_json_str)
+                            import re
+                            cleaned_str = re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', prompt_json_str)
+                            data = json.loads(cleaned_str)
 
                             # Extract the content from the messages array
                             message_content = data['messages'][0]['content']
