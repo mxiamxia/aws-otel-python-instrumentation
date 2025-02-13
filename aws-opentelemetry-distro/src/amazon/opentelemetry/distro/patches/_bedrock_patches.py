@@ -258,6 +258,9 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
 
                         trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
 
+                        if not trace_event:
+                            trace_event = event.get('trace', {}).get('trace', {}).get('guardrailTrace', {})
+
                         print(f"Trace event-{i} is {trace_event}")
 
                         # ---------------- Handle modelInvocationInput ---------------- #
@@ -401,11 +404,23 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                                         knowledge_base_output = observation_data.get("knowledgeBaseLookupOutput", {})
                                         retrieved_references = knowledge_base_output.get("retrievedReferences", [])
 
-                                        child_span.set_attribute("retrievedReferences.count", len(retrieved_references))
+                                        child_span.set_attribute("gen_ai.retrievedReferences.count", len(retrieved_references))
                                         child_span.set_attribute("aws.local.operation", "kbQuery")
 
                                 # Reset prev_invocation_event after using it
                                 prev_invocation_event = None
+                        elif 'inputAssessments' in trace_event:
+                            with tracer.start_as_current_span("InvokeGuardrail",
+                                                              context=trace.set_span_in_context(span)) as child_span:
+                                action = trace_event.get("action", {})
+                                first_assessment = trace_event["inputAssessments"][0]  # Get the first assessment
+                                if "topicPolicy" in first_assessment and "topics" in first_assessment["topicPolicy"]:
+                                    topics = first_assessment["topicPolicy"]["topics"]
+                                    if topics:  # Check if topics exist
+                                        child_span.set_attribute("gen_ai.guardrails.action", topics[0].get("action"))
+                                        child_span.set_attribute("gen_ai.guardrails.name", topics[0].get("name"))
+                                        child_span.set_attribute("gen_ai.guardrails.type", topics[0].get("type"))
+
                         elif 'rationale' in trace_event:
                             with tracer.start_as_current_span("LlmModelReasoning",
                                                               context=trace.set_span_in_context(span)) as child_span:
