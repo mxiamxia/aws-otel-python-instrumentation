@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import math
+import re
 from typing import Any, Dict, Optional
 from opentelemetry import trace
 from opentelemetry.trace import get_tracer
@@ -264,12 +265,17 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             model_input = trace_event.get("modelInvocationInput", {}).get("inferenceConfiguration", {})
                             prompt_json_str = trace_event.get("modelInvocationInput", {}).get("text", {})
                             # Parse the JSON string
-                            import re
+
                             cleaned_str = re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', prompt_json_str)
                             data = json.loads(cleaned_str)
 
                             # Extract the content from the messages array
-                            message_content = data['messages'][0]['content']
+                            # message_content = data['messages'][0]['content']
+                            message_content = None
+                            for message in reversed(data["messages"]):  # Reverse iterate to find the last "user" role
+                                if message["role"] == "user":
+                                    message_content = message["content"]
+                                    break
 
                             # Store extracted attributes for later use
                             prev_trace_event = {
