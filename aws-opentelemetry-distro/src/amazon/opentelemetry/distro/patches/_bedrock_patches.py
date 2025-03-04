@@ -243,7 +243,8 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                 schema_url="https://opentelemetry.io/schemas/1.11.0",
             )
             event_stream = result['completion']
-            buffered_events = [event for event in event_stream]
+            if event_stream is not None and any(event_stream):
+                buffered_events = [event for event in event_stream]
             try:
                 i = 0
                 for event in buffered_events:
@@ -319,6 +320,11 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                                 if model_output.get("outputTokens") is not None:
                                     child_span.set_attribute("gen_ai.usage.output_tokens", model_output["outputTokens"])
                                 child_span.set_attribute("aws.local.operation", "invokeModel")
+                                if prev_trace_event.get("prompt_input") is not None:
+                                    child_span.add_event("gen_ai.user.message", {"content":prev_trace_event["prompt_input"]})
+                                if model_output_content is not None:
+                                    child_span.add_event("gen_ai.choice",{"index":0,"finish_reason":"stop","message":{"content":model_output_content}})
+
 
 
                             # Reset prev_trace_event after using it
