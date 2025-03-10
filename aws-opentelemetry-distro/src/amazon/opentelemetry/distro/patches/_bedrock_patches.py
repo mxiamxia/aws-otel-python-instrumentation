@@ -300,6 +300,8 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             with tracer.start_as_current_span("InvokeLlmModel",
                                                               context=trace.set_span_in_context(span)) as child_span:
 
+                                child_span.set_attribute("aws.local.service", "ai_agent")
+
                                 # Add previously stored input attributes
                                 if prev_trace_event.get("temperature") is not None:
                                     child_span.set_attribute("gen_ai.request.temperature",
@@ -363,6 +365,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                                 with tracer.start_as_current_span("FinalResponse",
                                                                   context=trace.set_span_in_context(
                                                                       span)) as child_span:
+                                    child_span.set_attribute("aws.local.service", "ai_agent")
                                     final_resp = observation_data.get("finalResponse", {})
                                     child_span.set_attribute("gen_ai.agent.finalResponse",
                                                              final_resp.get("text"))
@@ -372,6 +375,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             # Create a single child span for invocationInput + observation
                                 with tracer.start_as_current_span("InvokeActionFunction",
                                                                   context=trace.set_span_in_context(span)) as child_span:
+                                    child_span.set_attribute("aws.local.service", "ai_agent")
 
                                     if prev_invocation_event["type"] == "action_group":
                                         # Add actionGroupInvocationInput attributes
@@ -419,6 +423,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                             with tracer.start_as_current_span("InvokeGuardrail",
                                                               context=trace.set_span_in_context(span)) as child_span:
                                 action = trace_event.get("action", {})
+                                child_span.set_attribute("aws.local.service", "ai_agent")
                                 first_assessment = trace_event["inputAssessments"][0]  # Get the first assessment
                                 if "topicPolicy" in first_assessment and "topics" in first_assessment["topicPolicy"]:
                                     topics = first_assessment["topicPolicy"]["topics"]
@@ -430,6 +435,7 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
                         elif 'rationale' in trace_event:
                             with tracer.start_as_current_span("LlmModelReasoning",
                                                               context=trace.set_span_in_context(span)) as child_span:
+                                child_span.set_attribute("aws.local.service", "ai_agent")
                                 rationale_data = trace_event.get("rationale", {})
                                 if rationale_data.get("text") is not None:
                                     child_span.set_attribute("gen_ai.agent.reasoning.rationale", rationale_data.get("text"))
