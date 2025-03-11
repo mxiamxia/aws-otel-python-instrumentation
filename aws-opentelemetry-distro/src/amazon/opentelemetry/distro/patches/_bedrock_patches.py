@@ -208,12 +208,44 @@ class _BedrockAgentExtension(_AwsSdkExtension):
                 )
 
 
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+@dataclass
+class ModelInvocationData:
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    prompt_input: Optional[str] = None
+    output_content: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+
+@dataclass
+class AgentInvocationData:
+    type: str
+    action_group_name: Optional[str] = None
+    execution_type: Optional[str] = None
+    function: Optional[str] = None
+    invocation_type: Optional[str] = None
+    knowledge_base_id: Optional[str] = None
+    text: Optional[str] = None
+
 class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
     """
     This class is an extension for <a
     href="https://docs.aws.amazon.com/bedrock/latest/APIReference/API_Operations_Agents_for_Amazon_Bedrock_Runtime.html">
     Agents for Amazon Bedrock Runtime</a>.
     """
+
+    def __init__(self, call_context: _AwsSdkCallContext):
+        super().__init__(call_context)
+        self._logger = logging.getLogger(__name__)
+        self._tracer = get_tracer(
+            __name__,
+            "test_version",
+            None,
+            schema_url="https://opentelemetry.io/schemas/1.11.0",
+        )
 
     def extract_attributes(self, attributes: _AttributeMapT):
         agent_id = self._call_context.params.get(_AGENT_ID)
@@ -225,225 +257,227 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
             attributes[AWS_BEDROCK_KNOWLEDGE_BASE_ID] = knowledge_base_id
 
     def on_success(self, span: Span, result: _BotoResultT):
-        agent_id = self._call_context.params.get(_AGENT_ID)
-        span_name = self._call_context.span_name
+        """Process the success response from Bedrock Agent Runtime."""
+        if self._call_context.span_name != "Bedrock Agent Runtime.InvokeAgent":
+            return
 
-        span.get_span_context()
-        print(f"Span start time is {span.start_time}")
-        # start_time_sec = start_time_ns / 1e9
-        # datetime.datetime.utcfromtimestamp(start_time_sec)
-        if agent_id:
-            print(f"Agent id is {agent_id}")
+        event_stream = result.get('completion')
+        if not event_stream or not any(event_stream):
+            return
 
-        if span_name == "Bedrock Agent Runtime.InvokeAgent":
-            tracer = get_tracer(
-                __name__,
-                "test_version",
-                None,
-                schema_url="https://opentelemetry.io/schemas/1.11.0",
-            )
-            event_stream = result['completion']
-            if event_stream is not None and any(event_stream):
-                buffered_events = [event for event in event_stream]
-            try:
-                i = 0
-                for event in buffered_events:
-                    i += 1
-                    # if 'chunk' in event:
-                    #     data = event['chunk']['bytes']
-                    #     agent_answer = data.decode('utf8')
-                    #     print(f"Final answer is {agent_answer}")
-
-                    if 'trace' in event:
-                        # print(json.dumps(event, indent=2))
-
-                        trace_event = event.get('trace', {}).get('trace', {}).get('orchestrationTrace', {})
-
-                        if not trace_event:
-                            trace_event = event.get('trace', {}).get('trace', {}).get('guardrailTrace', {})
-
-                        print(f"Trace event-{i} is {trace_event}")
-
-                        # ---------------- Handle modelInvocationInput ---------------- #
-                        if 'modelInvocationInput' in trace_event:
-                            model_input = trace_event.get("modelInvocationInput", {}).get("inferenceConfiguration", {})
-                            prompt_json_str = trace_event.get("modelInvocationInput", {}).get("text", {})
-                            # Parse the JSON string
-
-                            cleaned_str = re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', prompt_json_str)
-                            data = json.loads(cleaned_str)
-
-                            # Extract the content from the messages array
-                            # message_content = data['messages'][0]['content']
-                            message_content = None
-                            for message in reversed(data["messages"]):  # Reverse iterate to find the last "user" role
-                                if message["role"] == "user":
-                                    message_content = message["content"]
-                                    break
-
-                            # Store extracted attributes for later use
-                            prev_trace_event = {
-                                "temperature": model_input.get("temperature"),
-                                "top_p": model_input.get("topP"),
-                                "prompt_input": message_content
-                            }
-
-                        # ---------------- Handle modelInvocationOutput ---------------- #
-                        elif 'modelInvocationOutput' in trace_event and prev_trace_event:
-                            model_output = trace_event.get("modelInvocationOutput", {}).get("metadata", {}).get("usage",
-                                                                                                                {})
-
-                            model_output_content = trace_event.get("modelInvocationOutput", {}).get("rawResponse", {}).get("content",
-                                                                                                                {})
-
-                            # Create a single child span that includes both input & output attributes
-                            with tracer.start_as_current_span("InvokeLlmModel",
-                                                              context=trace.set_span_in_context(span)) as child_span:
-
-                                child_span.set_attribute("aws.local.service", "ai_agent")
-
-                                # Add previously stored input attributes
-                                if prev_trace_event.get("temperature") is not None:
-                                    child_span.set_attribute("gen_ai.request.temperature",
-                                                             prev_trace_event["temperature"])
-
-                                if prev_trace_event.get("prompt_input") is not None:
-                                    child_span.set_attribute("gen_ai.request.prompt", prev_trace_event["prompt_input"])
-                                if model_output_content is not None:
-                                    child_span.set_attribute("gen_ai.request.output", model_output_content)
-
-                                if prev_trace_event.get("top_p") is not None:
-                                    child_span.set_attribute("gen_ai.request.top_p", prev_trace_event["top_p"])
-
-                                # Add current output attributes
-                                if model_output.get("inputTokens") is not None:
-                                    child_span.set_attribute("gen_ai.usage.input_tokens", model_output["inputTokens"])
-
-                                if model_output.get("outputTokens") is not None:
-                                    child_span.set_attribute("gen_ai.usage.output_tokens", model_output["outputTokens"])
-                                child_span.set_attribute("aws.local.operation", "invokeModel")
-                                if prev_trace_event.get("prompt_input") is not None:
-                                    child_span.add_event("gen_ai.user.message", {"content":prev_trace_event["prompt_input"]})
-                                if model_output_content is not None:
-                                    child_span.add_event("gen_ai.choice",{"index":0,"finish_reason":"stop","message":{"content":model_output_content}})
-
-
-
-                            # Reset prev_trace_event after using it
-                            prev_trace_event = None
-
-                        # ---------------- Handle invocationInput ---------------- #
-                        elif 'invocationInput' in trace_event:
-                            invocation_data = trace_event.get("invocationInput", {})
-
-                            # Check for Action Group Invocation
-                            action_group_data = invocation_data.get("actionGroupInvocationInput", {})
-                            knowledge_base_data = invocation_data.get("knowledgeBaseLookupInput", {})
-
-                            if action_group_data:
-                                prev_invocation_event = {
-                                    "type": "action_group",
-                                    "actionGroupName": action_group_data.get("actionGroupName"),
-                                    "executionType": action_group_data.get("executionType"),
-                                    "function": action_group_data.get("function")
-                                }
-
-                            # Check for Knowledge Base Lookup
-                            elif knowledge_base_data:
-                                prev_invocation_event = {
-                                    "type": "knowledge_base",
-                                    "invocationType": invocation_data.get("invocationType"),
-                                    "knowledgeBaseId": knowledge_base_data.get("knowledgeBaseId"),
-                                    "text": knowledge_base_data.get("text")
-                                }
-
-                        # ---------------- Handle observation ---------------- #
-                        elif 'observation' in trace_event:
-                            observation_data = trace_event.get("observation", {})
-
-                            if observation_data.get("finalResponse"):
-                                with tracer.start_as_current_span("FinalResponse",
-                                                                  context=trace.set_span_in_context(
-                                                                      span)) as child_span:
-                                    child_span.set_attribute("aws.local.service", "ai_agent")
-                                    final_resp = observation_data.get("finalResponse", {})
-                                    child_span.set_attribute("gen_ai.agent.finalResponse",
-                                                             final_resp.get("text"))
-                                    child_span.set_attribute("aws.local.operation", "finalResponse")
-
-                            elif prev_invocation_event:
-                            # Create a single child span for invocationInput + observation
-                                with tracer.start_as_current_span("InvokeActionFunction",
-                                                                  context=trace.set_span_in_context(span)) as child_span:
-                                    child_span.set_attribute("aws.local.service", "ai_agent")
-
-                                    if prev_invocation_event["type"] == "action_group":
-                                        # Add actionGroupInvocationInput attributes
-                                        if prev_invocation_event.get("actionGroupName") is not None:
-                                            child_span.set_attribute("gen_ai.agent.action_group.name",
-                                                                     prev_invocation_event["actionGroupName"])
-
-                                        if prev_invocation_event.get("executionType") is not None:
-                                            child_span.set_attribute("gen_ai.agent.action_group.execution_type",
-                                                                     prev_invocation_event["executionType"])
-
-                                        if prev_invocation_event.get("function") is not None:
-                                            child_span.set_attribute("gen_ai.agent.action_group.function",
-                                                                     prev_invocation_event["function"])
-
-                                        # Add actionGroupInvocationOutput text if present
-                                        action_group_output = observation_data.get("actionGroupInvocationOutput", {})
-                                        if "text" in action_group_output:
-                                            child_span.set_attribute("gen_ai.agent.action_group.output", action_group_output["text"])
-                                        child_span.set_attribute("aws.local.operation", "funcInvocation")
-
-                                    elif prev_invocation_event["type"] == "knowledge_base":
-                                        # Add knowledgeBaseLookupInput attributes
-                                        if prev_invocation_event.get("invocationType") is not None:
-                                            child_span.set_attribute("gen_ai.agent.knowledge_base.invocation_type",
-                                                                     prev_invocation_event["invocationType"])
-
-                                        if prev_invocation_event.get("knowledgeBaseId") is not None:
-                                            child_span.set_attribute("gen_ai.agent.knowledge_base.id",
-                                                                     prev_invocation_event["knowledgeBaseId"])
-
-                                        if prev_invocation_event.get("text") is not None:
-                                            child_span.set_attribute("gen_ai.agent.knowledge_base.output", prev_invocation_event["text"])
-
-                                        # Add knowledgeBaseLookupOutput attributes if present
-                                        knowledge_base_output = observation_data.get("knowledgeBaseLookupOutput", {})
-                                        retrieved_references = knowledge_base_output.get("retrievedReferences", [])
-
-                                        child_span.set_attribute("gen_ai.retrievedReferences.count", len(retrieved_references))
-                                        child_span.set_attribute("aws.local.operation", "kbQuery")
-
-                                # Reset prev_invocation_event after using it
-                                prev_invocation_event = None
-                        elif 'inputAssessments' in trace_event:
-                            with tracer.start_as_current_span("InvokeGuardrail",
-                                                              context=trace.set_span_in_context(span)) as child_span:
-                                action = trace_event.get("action", {})
-                                child_span.set_attribute("aws.local.service", "ai_agent")
-                                first_assessment = trace_event["inputAssessments"][0]  # Get the first assessment
-                                if "topicPolicy" in first_assessment and "topics" in first_assessment["topicPolicy"]:
-                                    topics = first_assessment["topicPolicy"]["topics"]
-                                    if topics:  # Check if topics exist
-                                        child_span.set_attribute("gen_ai.guardrails.action", topics[0].get("action"))
-                                        child_span.set_attribute("gen_ai.guardrails.name", topics[0].get("name"))
-                                        child_span.set_attribute("gen_ai.guardrails.type", topics[0].get("type"))
-
-                        elif 'rationale' in trace_event:
-                            with tracer.start_as_current_span("LlmModelReasoning",
-                                                              context=trace.set_span_in_context(span)) as child_span:
-                                child_span.set_attribute("aws.local.service", "ai_agent")
-                                rationale_data = trace_event.get("rationale", {})
-                                if rationale_data.get("text") is not None:
-                                    child_span.set_attribute("gen_ai.agent.reasoning.rationale", rationale_data.get("text"))
-                                child_span.set_attribute("aws.local.operation", "rationale")
-
-            except Exception as e:
-                    raise Exception("unexpected event.", e)
+        buffered_events = [event for event in event_stream]
+        try:
+            self._process_event_stream(span, buffered_events)
             result['completion'] = buffered_events
+        except Exception as e:
+            self._logger.error("Error processing event stream: %s", str(e))
+            # Swallow the exception to not interrupt the application
+            # but still preserve the original events
+            result['completion'] = buffered_events
+
+    def _process_event_stream(self, span: Span, events: List[Dict[str, Any]]):
+        """Process the event stream and create appropriate spans."""
+        model_data = None
+        agent_data = None
+
+        for event in events:
+            if 'trace' not in event:
+                continue
+
+            trace_event = (
+                event.get('trace', {})
+                .get('trace', {})
+                .get('orchestrationTrace', {}) or
+                event.get('trace', {})
+                .get('trace', {})
+                .get('guardrailTrace', {})
+            )
+
+            if not trace_event:
+                continue
+
+            if 'modelInvocationInput' in trace_event:
+                model_data = self._handle_model_invocation_input(trace_event)
+            elif 'modelInvocationOutput' in trace_event and model_data:
+                self._handle_model_invocation_output(span, trace_event, model_data)
+                model_data = None
+            elif 'invocationInput' in trace_event:
+                agent_data = self._handle_invocation_input(trace_event)
+            elif 'observation' in trace_event:
+                self._handle_observation(span, trace_event, agent_data)
+                agent_data = None
+            elif 'inputAssessments' in trace_event:
+                self._handle_guardrail(span, trace_event)
+            elif 'rationale' in trace_event:
+                self._handle_reasoning(span, trace_event)
+
+    def _handle_model_invocation_input(self, trace_event: Dict[str, Any]) -> ModelInvocationData:
+        """Process model invocation input and return structured data."""
+        model_input = trace_event.get("modelInvocationInput", {})
+        inference_config = model_input.get("inferenceConfiguration", {})
+        prompt_json_str = model_input.get("text", {})
+
+        cleaned_str = re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', prompt_json_str)
+        data = json.loads(cleaned_str)
+
+        message_content = None
+        for message in reversed(data.get("messages", [])):
+            if message.get("role") == "user":
+                message_content = message.get("content")
+                break
+
+        return ModelInvocationData(
+            temperature=inference_config.get("temperature"),
+            top_p=inference_config.get("topP"),
+            prompt_input=message_content
+        )
+
+    def _handle_model_invocation_output(self, span: Span, trace_event: Dict[str, Any], model_data: ModelInvocationData):
+        """Process model invocation output and create a span."""
+        model_output = trace_event.get("modelInvocationOutput", {})
+        usage = model_output.get("metadata", {}).get("usage", {})
+        content = model_output.get("rawResponse", {}).get("content")
+
+        model_data.output_content = content
+        model_data.input_tokens = usage.get("inputTokens")
+        model_data.output_tokens = usage.get("outputTokens")
+
+        with self._tracer.start_as_current_span(
+            "InvokeLlmModel",
+            context=trace.set_span_in_context(span)
+        ) as child_span:
+            child_span.set_attribute("aws.local.service", "ai_agent")
+            child_span.set_attribute("aws.local.operation", "invokeModel")
+
+            if model_data.temperature is not None:
+                child_span.set_attribute("gen_ai.request.temperature", model_data.temperature)
+            if model_data.top_p is not None:
+                child_span.set_attribute("gen_ai.request.top_p", model_data.top_p)
+            if model_data.prompt_input is not None:
+                child_span.set_attribute("gen_ai.request.prompt", model_data.prompt_input)
+                child_span.add_event("gen_ai.user.message", {"content": model_data.prompt_input})
+            if model_data.output_content is not None:
+                child_span.set_attribute("gen_ai.request.output", model_data.output_content)
+                child_span.add_event("gen_ai.choice", {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"content": model_data.output_content}
+                })
+            if model_data.input_tokens is not None:
+                child_span.set_attribute("gen_ai.usage.input_tokens", model_data.input_tokens)
+            if model_data.output_tokens is not None:
+                child_span.set_attribute("gen_ai.usage.output_tokens", model_data.output_tokens)
+
+    def _handle_invocation_input(self, trace_event: Dict[str, Any]) -> Optional[AgentInvocationData]:
+        """Process invocation input and return structured data."""
+        invocation_data = trace_event.get("invocationInput", {})
+        action_group_data = invocation_data.get("actionGroupInvocationInput", {})
+        knowledge_base_data = invocation_data.get("knowledgeBaseLookupInput", {})
+
+        if action_group_data:
+            return AgentInvocationData(
+                type="action_group",
+                action_group_name=action_group_data.get("actionGroupName"),
+                execution_type=action_group_data.get("executionType"),
+                function=action_group_data.get("function")
+            )
+        elif knowledge_base_data:
+            return AgentInvocationData(
+                type="knowledge_base",
+                invocation_type=invocation_data.get("invocationType"),
+                knowledge_base_id=knowledge_base_data.get("knowledgeBaseId"),
+                text=knowledge_base_data.get("text")
+            )
+        return None
+
+    def _handle_observation(self, span: Span, trace_event: Dict[str, Any], agent_data: Optional[AgentInvocationData]):
+        """Process observation data and create appropriate spans."""
+        observation_data = trace_event.get("observation", {})
+
+        if observation_data.get("finalResponse"):
+            self._create_final_response_span(span, observation_data)
+        elif agent_data:
+            self._create_agent_action_span(span, agent_data, observation_data)
+
+    def _create_final_response_span(self, span: Span, observation_data: Dict[str, Any]):
+        """Create a span for final response."""
+        with self._tracer.start_as_current_span(
+            "FinalResponse",
+            context=trace.set_span_in_context(span)
+        ) as child_span:
+            child_span.set_attribute("aws.local.service", "ai_agent")
+            child_span.set_attribute("aws.local.operation", "finalResponse")
+            final_resp = observation_data.get("finalResponse", {})
+            if final_resp.get("text"):
+                child_span.set_attribute("gen_ai.agent.finalResponse", final_resp["text"])
+
+    def _create_agent_action_span(self, span: Span, agent_data: AgentInvocationData, observation_data: Dict[str, Any]):
+        """Create a span for agent action."""
+        with self._tracer.start_as_current_span(
+            "InvokeActionFunction",
+            context=trace.set_span_in_context(span)
+        ) as child_span:
+            child_span.set_attribute("aws.local.service", "ai_agent")
+
+            if agent_data.type == "action_group":
+                self._set_action_group_attributes(child_span, agent_data, observation_data)
+            elif agent_data.type == "knowledge_base":
+                self._set_knowledge_base_attributes(child_span, agent_data, observation_data)
+
+    def _set_action_group_attributes(self, span: Span, agent_data: AgentInvocationData, observation_data: Dict[str, Any]):
+        """Set attributes for action group span."""
+        span.set_attribute("aws.local.operation", "funcInvocation")
+        if agent_data.action_group_name:
+            span.set_attribute("gen_ai.agent.action_group.name", agent_data.action_group_name)
+        if agent_data.execution_type:
+            span.set_attribute("gen_ai.agent.action_group.execution_type", agent_data.execution_type)
+        if agent_data.function:
+            span.set_attribute("gen_ai.agent.action_group.function", agent_data.function)
+
+        action_group_output = observation_data.get("actionGroupInvocationOutput", {})
+        if action_group_output.get("text"):
+            span.set_attribute("gen_ai.agent.action_group.output", action_group_output["text"])
+
+    def _set_knowledge_base_attributes(self, span: Span, agent_data: AgentInvocationData, observation_data: Dict[str, Any]):
+        """Set attributes for knowledge base span."""
+        span.set_attribute("aws.local.operation", "kbQuery")
+        if agent_data.invocation_type:
+            span.set_attribute("gen_ai.agent.knowledge_base.invocation_type", agent_data.invocation_type)
+        if agent_data.knowledge_base_id:
+            span.set_attribute("gen_ai.agent.knowledge_base.id", agent_data.knowledge_base_id)
+        if agent_data.text:
+            span.set_attribute("gen_ai.agent.knowledge_base.output", agent_data.text)
+
+        knowledge_base_output = observation_data.get("knowledgeBaseLookupOutput", {})
+        retrieved_references = knowledge_base_output.get("retrievedReferences", [])
+        span.set_attribute("gen_ai.retrievedReferences.count", len(retrieved_references))
+
+    def _handle_guardrail(self, span: Span, trace_event: Dict[str, Any]):
+        """Process guardrail data and create a span."""
+        with self._tracer.start_as_current_span(
+            "InvokeGuardrail",
+            context=trace.set_span_in_context(span)
+        ) as child_span:
+            child_span.set_attribute("aws.local.service", "ai_agent")
+            assessments = trace_event.get("inputAssessments", [])
+            if assessments and "topicPolicy" in assessments[0]:
+                topics = assessments[0]["topicPolicy"].get("topics", [])
+                if topics:
+                    child_span.set_attribute("gen_ai.guardrails.action", topics[0].get("action"))
+                    child_span.set_attribute("gen_ai.guardrails.name", topics[0].get("name"))
+                    child_span.set_attribute("gen_ai.guardrails.type", topics[0].get("type"))
+
+    def _handle_reasoning(self, span: Span, trace_event: Dict[str, Any]):
+        """Process reasoning data and create a span."""
+        with self._tracer.start_as_current_span(
+            "LlmModelReasoning",
+            context=trace.set_span_in_context(span)
+        ) as child_span:
+            child_span.set_attribute("aws.local.service", "ai_agent")
+            child_span.set_attribute("aws.local.operation", "rationale")
+            rationale_text = trace_event.get("rationale", {}).get("text")
+            if rationale_text:
+                child_span.set_attribute("gen_ai.agent.reasoning.rationale", rationale_text)
 
 
 class _BedrockExtension(_AwsSdkExtension):
