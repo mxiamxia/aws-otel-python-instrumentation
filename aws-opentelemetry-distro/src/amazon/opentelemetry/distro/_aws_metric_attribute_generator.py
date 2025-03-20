@@ -151,6 +151,9 @@ def _generate_dependency_metric_attributes(span: ReadableSpan, resource: Resourc
 
 
 def _set_service(resource: Resource, span: ReadableSpan, attributes: BoundedAttributes) -> None:
+    if span.attributes.get(AWS_LOCAL_SERVICE) is not None:
+        attributes[AWS_LOCAL_SERVICE] = span.attributes.get(AWS_LOCAL_SERVICE) 
+        return
     service_name, is_unknown = get_service_attribute(resource)
     if is_unknown:
         _log_unknown_attribute(AWS_LOCAL_SERVICE, span)

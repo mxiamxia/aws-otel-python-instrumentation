@@ -15,6 +15,8 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace import get_tracer
 from opentelemetry.trace.span import Span
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
 
 iam_client = boto3.client('iam')
 sts_client = boto3.client('sts')
@@ -285,13 +287,12 @@ def process_cached_traces():
                     kind=SpanKind.SERVER,
                     context=span_context,
                     attributes={
-                        "service.name": "bedrock-agent-processor",
-                        "cached_sessions": len(event_stream_cache),
+                        "session_id": session_id,
                         "aws.local.service": "BookingAgent",
                         "aws.local.operation": "InvokeAgent"
                     }
                 ) as span:
-                    span.set_attribute("aws.local.service", "ai_agent")
+                    span.set_attribute("aws.local.service", "BookingAgent")
                 _process_event_stream(span, events)
         except Exception as e:
             logger.error("Error processing event stream: %s", str(e))
