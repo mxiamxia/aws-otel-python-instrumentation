@@ -414,6 +414,9 @@ def _customize_resource(resource: Resource) -> Resource:
     if is_unknown:
         _logger.debug("No valid service name found")
 
+    if service_name == "ai_booking_service":
+        return resource
+
     return resource.merge(Resource.create({AWS_LOCAL_SERVICE: service_name}))
 
 
