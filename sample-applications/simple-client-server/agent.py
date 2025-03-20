@@ -287,6 +287,8 @@ def process_cached_traces():
                     attributes={
                         "service.name": "bedrock-agent-processor",
                         "cached_sessions": len(event_stream_cache),
+                        "aws.local.service": "BookingAgent",
+                        "aws.local.operation": "InvokeAgent"
                     }
                 ) as span:
                     span.set_attribute("aws.local.service", "ai_agent")
@@ -402,9 +404,11 @@ def _handle_model_invocation_output(span: Span, trace_event: Dict[str, Any], mod
         context=trace.set_span_in_context(span),
         kind=SpanKind.CLIENT
     ) as child_span:
-        child_span.set_attribute("aws.local.service", "ai_agent")
-        child_span.set_attribute("aws.local.operation", "invokeModel")
-
+        child_span.set_attribute("aws.local.service", "BookingAgent")
+        child_span.set_attribute("aws.local.operation", "InvokeAgent")
+        child_span.set_attribute("aws.remote.service", "ClaudeModel")
+        child_span.set_attribute("aws.remote.operation", "InvokeModel")
+        
         if model_data.temperature is not None:
             child_span.set_attribute("gen_ai.request.temperature", model_data.temperature)
         if model_data.top_p is not None:
@@ -462,8 +466,10 @@ def _create_final_response_span(span: Span, observation_data: Dict[str, Any]):
         context=trace.set_span_in_context(span),
         kind=SpanKind.CLIENT
     ) as child_span:
-        child_span.set_attribute("aws.local.service", "ai_agent")
-        child_span.set_attribute("aws.local.operation", "finalResponse")
+        child_span.set_attribute("aws.local.service", "BookingAgent")
+        child_span.set_attribute("aws.local.operation", "InvokeAgent")
+        child_span.set_attribute("aws.remote.service", "ClaudeModel")
+        child_span.set_attribute("aws.remote.operation", "InvokeModel")
         final_resp = observation_data.get("finalResponse", {})
         if final_resp.get("text"):
             child_span.set_attribute("gen_ai.agent.finalResponse", final_resp["text"])
@@ -475,7 +481,8 @@ def _create_agent_action_span(span: Span, agent_data: AgentInvocationData, obser
         context=trace.set_span_in_context(span),
         kind=SpanKind.CLIENT
     ) as child_span:
-        child_span.set_attribute("aws.local.service", "ai_agent")
+        child_span.set_attribute("aws.local.service", "BookingAgent")
+        child_span.set_attribute("aws.local.operation", "InvokeAgent")
 
         if agent_data.type == "action_group":
             _set_action_group_attributes(child_span, agent_data, observation_data)
@@ -491,6 +498,8 @@ def _set_action_group_attributes(span: Span, agent_data: AgentInvocationData, ob
         span.set_attribute("gen_ai.agent.action_group.execution_type", agent_data.execution_type)
     if agent_data.function:
         span.set_attribute("gen_ai.agent.action_group.function", agent_data.function)
+        span.set_attribute("aws.remote.service", agent_data.function)
+        span.set_attribute("aws.remote.operation", "invokeLambda")
 
     action_group_output = observation_data.get("actionGroupInvocationOutput", {})
     if action_group_output.get("text"):
@@ -503,6 +512,8 @@ def _set_knowledge_base_attributes(span: Span, agent_data: AgentInvocationData, 
         span.set_attribute("gen_ai.agent.knowledge_base.invocation_type", agent_data.invocation_type)
     if agent_data.knowledge_base_id:
         span.set_attribute("gen_ai.agent.knowledge_base.id", agent_data.knowledge_base_id)
+        span.set_attribute("aws.remote.service", "KnowledgeBase")
+        span.set_attribute("aws.remote.operation", "QueryKB")
     if agent_data.text:
         span.set_attribute("gen_ai.agent.knowledge_base.output", agent_data.text)
 
@@ -517,7 +528,10 @@ def _handle_guardrail(span: Span, trace_event: Dict[str, Any]):
         context=trace.set_span_in_context(span),
         kind=SpanKind.CLIENT
     ) as child_span:
-        child_span.set_attribute("aws.local.service", "ai_agent")
+        child_span.set_attribute("aws.local.service", "BookingAgent")
+        child_span.set_attribute("aws.local.operation", "InvokeAgent")
+        child_span.set_attribute("aws.remote.service", "Guardrail")
+        child_span.set_attribute("aws.remote.operation", "QueryGaurdrail")
         assessments = trace_event.get("inputAssessments", [])
         if assessments and "topicPolicy" in assessments[0]:
             topics = assessments[0]["topicPolicy"].get("topics", [])
@@ -533,11 +547,13 @@ def _handle_reasoning(span: Span, trace_event: Dict[str, Any]):
         context=trace.set_span_in_context(span),
         kind=SpanKind.CLIENT
     ) as child_span:
-        child_span.set_attribute("aws.local.service", "ai_agent")
-        child_span.set_attribute("aws.local.operation", "rationale")
+        child_span.set_attribute("aws.local.service", "BookingAgent")
+        child_span.set_attribute("aws.local.operation", "InvokeAgent")
         rationale_text = trace_event.get("rationale", {}).get("text")
         if rationale_text:
             child_span.set_attribute("gen_ai.agent.reasoning.rationale", rationale_text)
+        child_span.set_attribute("aws.remote.service", "ClaudeModel")
+        child_span.set_attribute("aws.remote.operation", "Reasoning")
 
 
 def start_trace_processing_scheduler():
