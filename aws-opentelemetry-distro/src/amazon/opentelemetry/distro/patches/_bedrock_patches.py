@@ -257,23 +257,24 @@ class _BedrockAgentRuntimeExtension(_AwsSdkExtension):
             attributes[AWS_BEDROCK_KNOWLEDGE_BASE_ID] = knowledge_base_id
 
     def on_success(self, span: Span, result: _BotoResultT):
+
         """Process the success response from Bedrock Agent Runtime."""
         if self._call_context.span_name != "Bedrock Agent Runtime.InvokeAgent":
             return
 
-        event_stream = result.get('completion')
-        if not event_stream or not any(event_stream):
-            return
+        # event_stream = result.get('completion')
+        # if not event_stream or not any(event_stream):
+        #     return
 
-        buffered_events = [event for event in event_stream]
-        try:
-            self._process_event_stream(span, buffered_events)
-            result['completion'] = buffered_events
-        except Exception as e:
-            self._logger.error("Error processing event stream: %s", str(e))
-            # Swallow the exception to not interrupt the application
-            # but still preserve the original events
-            result['completion'] = buffered_events
+        # buffered_events = [event for event in event_stream]
+        # try:
+        #     self._process_event_stream(span, buffered_events)
+        #     result['completion'] = buffered_events
+        # except Exception as e:
+        #     self._logger.error("Error processing event stream: %s", str(e))
+        #     # Swallow the exception to not interrupt the application
+        #     # but still preserve the original events
+        #     result['completion'] = buffered_events
 
     def _process_event_stream(self, span: Span, events: List[Dict[str, Any]]):
         """Process the event stream and create appropriate spans."""

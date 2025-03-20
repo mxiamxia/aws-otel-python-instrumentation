@@ -23,6 +23,13 @@ def test():
 
 @app.route("/invoke_agent", methods=['POST'])
 def invoke_agent():
+    """
+    Invokes the agent and retrieves the response.
+    
+    The agent.py invoke_agent_h function now:
+    1. Caches event_stream data by session_id
+    2. Starts a scheduler that periodically processes and logs trace data
+    """
     start_time = time.time()
 
     data = request.json
