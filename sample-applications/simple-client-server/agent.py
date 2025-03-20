@@ -283,7 +283,7 @@ def process_cached_traces():
                 events = session_data["events"]
                 logger.info(f"Processing event stream for session: {session_id} : {len(events)}")
                 with tracer.start_as_current_span(
-                    name="AWS Bedrock Agent",
+                    name="InvokeAgent",
                     kind=SpanKind.SERVER,
                     context=span_context,
                     attributes={
