@@ -492,7 +492,6 @@ def _create_agent_action_span(span: Span, agent_data: AgentInvocationData, obser
 
 def _set_action_group_attributes(span: Span, agent_data: AgentInvocationData, observation_data: Dict[str, Any]):
     """Set attributes for action group span."""
-    span.set_attribute("aws.local.operation", "funcInvocation")
     if agent_data.action_group_name:
         span.set_attribute("gen_ai.agent.action_group.name", agent_data.action_group_name)
     if agent_data.execution_type:
@@ -508,7 +507,6 @@ def _set_action_group_attributes(span: Span, agent_data: AgentInvocationData, ob
 
 def _set_knowledge_base_attributes(span: Span, agent_data: AgentInvocationData, observation_data: Dict[str, Any]):
     """Set attributes for knowledge base span."""
-    span.set_attribute("aws.local.operation", "kbQuery")
     if agent_data.invocation_type:
         span.set_attribute("gen_ai.agent.knowledge_base.invocation_type", agent_data.invocation_type)
     if agent_data.knowledge_base_id:
