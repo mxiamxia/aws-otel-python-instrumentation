@@ -422,7 +422,7 @@ def _handle_model_invocation_output(span: Span, trace_event: Dict[str, Any], mod
             child_span.add_event("gen_ai.choice", {
                 "index": 0,
                 "finish_reason": "stop",
-                "message": {"content": model_data.output_content}
+                "message": model_data.output_content
             })
         if model_data.input_tokens is not None:
             child_span.set_attribute("gen_ai.usage.input_tokens", model_data.input_tokens)
