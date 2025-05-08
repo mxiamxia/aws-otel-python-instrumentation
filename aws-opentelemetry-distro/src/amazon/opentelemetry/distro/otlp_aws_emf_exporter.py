@@ -41,6 +41,14 @@ class EMFMetricData:
     timestamp: Optional[int] = None
     values: List[Union[int, float]] = field(default_factory=list)
     counts: List[int] = field(default_factory=list)
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "unit": self.unit,
+            "values": self.values,
+            "counts": self.counts,
+        }
 
 
 @dataclass
@@ -48,9 +56,9 @@ class EMFLog:
     """Represents a complete EMF log entry."""
     version: str = "0"
     dimensions: List[List[str]] = field(default_factory=list)
-    metrics: List[Dict[str, EMFMetricData]] = field(default_factory=list)
-    metadata: Dict[str, Dict[str, Union[str, int, float]]] = field(default_factory=dict)
-    _aws: Dict[str, Union[str, Dict]] = field(default_factory=dict)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    _aws: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         """Convert EMF log to dictionary format."""
@@ -60,10 +68,21 @@ class EMFLog:
         }
         
         if self.dimensions:
+            metrics_list = []
+            for metric_dict in self.metrics:
+                # Convert each metric dict with EMFMetricData to serializable dict
+                serialized_metric = {}
+                for metric_name, metric_data in metric_dict.items():
+                    if isinstance(metric_data, EMFMetricData):
+                        serialized_metric[metric_name] = metric_data.to_dict()
+                    else:
+                        serialized_metric[metric_name] = metric_data
+                metrics_list.append(serialized_metric)
+            
             result["_aws"]["CloudWatchMetrics"] = [{
                 "Namespace": self._aws.get("Namespace", "default"),
                 "Dimensions": self.dimensions,
-                "Metrics": self.metrics,
+                "Metrics": metrics_list,
             }]
         
         return result
@@ -268,12 +287,15 @@ class CloudWatchEMFExporter(MetricExporter):
         
         return None
     
-    def _create_emf_log(self, metric_records, resource: Resource) -> EMFLog:
-        """Create an EMF log from metric records."""
-        emf_log = EMFLog()
-        emf_log._aws = {
-            "Namespace": self.namespace,
-            "Timestamp": int(time.time() * 1000),
+    def _create_emf_log(self, metric_records, resource: Resource) -> Dict:
+        """Create EMF log dictionary from metric records."""
+        # Start with base structure
+        emf_log = {
+            "_aws": {
+                "Namespace": self.namespace,
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": []
+            }
         }
         
         # Group metrics by dimensions
@@ -301,42 +323,53 @@ class CloudWatchEMFExporter(MetricExporter):
             for name in dimension_names:
                 dimension_values[dimension_key][name] = attributes.get(name, "")
             
-            # Create metric data
-            metric_data = EMFMetricData(unit=unit)
+            # Create metric data dict directly (no custom class)
+            metric_data = {}
+            if unit:
+                metric_data["Unit"] = unit
             
             # Process different types of aggregations
             if hasattr(record, 'histogram_data'):
                 # Histogram
                 histogram = record.histogram_data
                 if histogram.count > 0:
-                    metric_data.values = list(histogram.bucket_boundaries) if hasattr(histogram, 'bucket_boundaries') else []
-                    metric_data.counts = list(histogram.bucket_counts) if hasattr(histogram, 'bucket_counts') else []
+                    values = list(histogram.bucket_boundaries) if hasattr(histogram, 'bucket_boundaries') else []
+                    counts = list(histogram.bucket_counts) if hasattr(histogram, 'bucket_counts') else []
+                    # Store values directly in emf_log
+                    emf_log[metric_name] = values[0] if values else 0
+                    metric_data["Values"] = values
+                    metric_data["Counts"] = counts
             elif hasattr(record, 'sum_data'):
                 # Counter/UpDownCounter
                 sum_data = record.sum_data
-                metric_data.values = [sum_data.value]
-                metric_data.counts = [1]
+                # Store value directly in emf_log
+                emf_log[metric_name] = sum_data.value
+                metric_data["Value"] = sum_data.value
             else:
                 # Other aggregations (e.g., LastValue)
                 if hasattr(record, 'value'):
-                    metric_data.values = [record.value]
-                    metric_data.counts = [1]
+                    # Store value directly in emf_log
+                    emf_log[metric_name] = record.value
+                    metric_data["Value"] = record.value
             
-            # Add to dimension group
-            dimension_groups[dimension_key].append({metric_name: metric_data})
+            # Add to dimension group with the metric definition
+            dimension_groups[dimension_key].append({
+                "Name": metric_name,
+                **metric_data
+            })
         
-        # Build EMF structure
+        # Build CloudWatch Metrics structure
         for dimension_key, metrics in dimension_groups.items():
-            # Add dimension set
-            emf_log.dimensions.append(list(dimension_key))
+            # Add CloudWatch Metrics entry
+            emf_log["_aws"]["CloudWatchMetrics"].append({
+                "Namespace": self.namespace,
+                "Dimensions": [list(dimension_key)],
+                "Metrics": metrics
+            })
             
-            # Add metrics for this dimension set
-            for metric in metrics:
-                emf_log.metrics.append(metric)
-            
-            # Add dimension values to metadata
+            # Add dimension values to the root of the EMF log
             for name, value in dimension_values[dimension_key].items():
-                emf_log.metadata[name] = value
+                emf_log[name] = value
         
         return emf_log
     
@@ -353,6 +386,7 @@ class CloudWatchEMFExporter(MetricExporter):
             MetricExportResult indicating success or failure
         """
         try:
+            logger.debug("Starting to export metrics data")
             if not metrics_data.resource_metrics:
                 return MetricExportResult.SUCCESS
             
@@ -367,15 +401,15 @@ class CloudWatchEMFExporter(MetricExporter):
                     # Process all metrics in this scope
                     for metric in scope_metrics.metrics:
                         # Convert metrics to a format compatible with _create_emf_log
-                        # This depends on the specific metric type (counter, histogram, etc.)
-                        if hasattr(metric, 'data_points'):
-                            for data_point in metric.data_points:
+                        # Access data points through metric.data.data_points
+                        if hasattr(metric, 'data') and hasattr(metric.data, 'data_points'):
+                            for data_point in metric.data.data_points:
                                 # Create a record-like object for compatibility
                                 record = type('MetricRecord', (), {})()
                                 record.instrument = type('Instrument', (), {})()
                                 record.instrument.name = metric.name
-                                record.instrument.unit = getattr(metric, 'unit', None)
-                                record.instrument.description = getattr(metric, 'description', None)
+                                record.instrument.unit = metric.unit
+                                record.instrument.description = metric.description
                                 
                                 # Set attributes
                                 record.attributes = data_point.attributes
@@ -399,15 +433,15 @@ class CloudWatchEMFExporter(MetricExporter):
                                 metric_records.append(record)
                     
                     if metric_records:
-                        # Create EMF log for this batch of metrics
-                        emf_log = self._create_emf_log(metric_records, resource)
+                        # Create EMF log for this batch of metrics - now returns a dict directly
+                        emf_log_dict = self._create_emf_log(metric_records, resource)
                         
-                        # Convert to JSON
+                        # Convert to JSON - no need for to_dict() conversion
                         log_event = {
-                            "message": json.dumps(emf_log.to_dict()),
+                            "message": json.dumps(emf_log_dict),
                             "timestamp": int(time.time() * 1000)
                         }
-                        print(f"EMF Log Event: {log_event['message']}")
+                        logger.info(f"EMF Log Event: {log_event['message']}")
                         # Send to CloudWatch Logs
                         self._send_log_event(log_event)
             
@@ -415,34 +449,46 @@ class CloudWatchEMFExporter(MetricExporter):
             
         except Exception as e:
             logger.error(f"Failed to export metrics: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return MetricExportResult.FAILURE
     
     def _send_log_event(self, log_event: Dict):
         """Send a log event to CloudWatch Logs."""
         try:
-            # Check if log stream exists
+            # First check if log group exists and create it if needed
             try:
-                self.logs_client.describe_log_streams(
-                    logGroupName=self.log_group_name,
-                    logStreamNamePrefix=self.log_stream_name,
-                    limit=1
+                self.logs_client.create_log_group(
+                    logGroupName=self.log_group_name
                 )
-            except Exception:
-                # Create log stream
+                logger.info(f"Created log group: {self.log_group_name}")
+            except self.logs_client.exceptions.ResourceAlreadyExistsException:
+                # Log group already exists, this is fine
+                logger.debug(f"Log group {self.log_group_name} already exists")
+            
+            # Then check if log stream exists and create it if needed
+            try:
                 self.logs_client.create_log_stream(
                     logGroupName=self.log_group_name,
                     logStreamName=self.log_stream_name
                 )
+                logger.info(f"Created log stream: {self.log_stream_name}")
+            except self.logs_client.exceptions.ResourceAlreadyExistsException:
+                # Log stream already exists, this is fine
+                logger.debug(f"Log stream {self.log_stream_name} already exists")
             
             # Put log event
-            self.logs_client.put_log_events(
+            response = self.logs_client.put_log_events(
                 logGroupName=self.log_group_name,
                 logStreamName=self.log_stream_name,
                 logEvents=[log_event]
             )
+            logger.debug(f"CloudWatch PutLogEvents response: {response}")
             
         except Exception as e:
             logger.error(f"Failed to send log event: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
     
     def force_flush(self, timeout_millis: int = 10000) -> bool:
@@ -580,7 +626,7 @@ if __name__ == "__main__":
     try:
         while True:
             # Simulate HTTP GET request
-            request_counter.add(1, {"method": "GET", "status": "200"})
+            request_counter.add(1, {"method1": "GET", "status": "200"})
             request_duration.record(0.1 + (0.5 * random.random()), {"method": "GET", "status": "200"})
             
             # Simulate HTTP POST request
@@ -589,7 +635,7 @@ if __name__ == "__main__":
             
             # Simulate some errors
             if random.random() < 0.1:  # 10% error rate
-                request_counter.add(1, {"method": "GET", "status": "500"})
+                request_counter.add(1, {"method3": "GET", "status": "500"})
                 request_duration.record(1.0 + (1.0 * random.random()), {"method": "GET", "status": "500"})
             
             # Sleep between 100ms and 300ms
