@@ -4,9 +4,10 @@ This exporter converts OTel metrics into CloudWatch EMF format.
 """
 
 import json
+import os
 import time
 import logging
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -50,7 +51,6 @@ class EMFMetricData:
             "counts": self.counts,
         }
 
-
 @dataclass
 class EMFLog:
     """Represents a complete EMF log entry."""
@@ -86,8 +86,7 @@ class EMFLog:
             }]
         
         return result
-
-
+        
 class CloudWatchEMFExporter(MetricExporter):
     """
     OpenTelemetry metrics exporter for CloudWatch EMF format.
@@ -144,7 +143,7 @@ class CloudWatchEMFExporter(MetricExporter):
             preferred_temporality: Optional dictionary mapping instrument types to aggregation temporality
             **kwargs: Additional arguments passed to boto3 client
         """
-        super().__init__()
+        super().__init__(preferred_temporality)
         
         self.namespace = namespace
         self.log_group_name = log_group_name
@@ -153,24 +152,6 @@ class CloudWatchEMFExporter(MetricExporter):
         self.metric_declarations = metric_declarations or []
         self.parse_json_encoded_attr_values = parse_json_encoded_attr_values
         
-        # Default to DELTA temporality for all instrument types if not specified
-        if preferred_temporality is None:
-            # Import all instrument types
-            from opentelemetry.sdk.metrics import (
-                Counter, Histogram, ObservableCounter, 
-                ObservableGauge, ObservableUpDownCounter, UpDownCounter
-            )
-            self._preferred_temporality = {
-                Counter: AggregationTemporality.DELTA,
-                Histogram: AggregationTemporality.DELTA,
-                ObservableCounter: AggregationTemporality.DELTA,
-                ObservableGauge: AggregationTemporality.DELTA,
-                ObservableUpDownCounter: AggregationTemporality.DELTA,
-                UpDownCounter: AggregationTemporality.DELTA
-            }
-        else:
-            self._preferred_temporality = preferred_temporality
-        
         # Initialize CloudWatch Logs client
         session = boto3.Session(region_name=aws_region)
         self.logs_client = session.client("logs", **kwargs)
@@ -178,28 +159,12 @@ class CloudWatchEMFExporter(MetricExporter):
         # Ensure log group exists
         self._ensure_log_group_exists()
     
-    def preferred_temporality(self, instrument_type):
-        """
-        Return the preferred aggregation temporality for the instrument type.
-        
-        Args:
-            instrument_type: Type of the instrument
-            
-        Returns:
-            The preferred AggregationTemporality for the instrument type
-        """
-        # Return the configured temporality for this instrument type
-        # Default to DELTA if not specified
-        return self._preferred_temporality.get(instrument_type, AggregationTemporality.DELTA)
-    
     def _generate_log_stream_name(self) -> str:
         """Generate a unique log stream name."""
-        import socket
         import uuid
         
-        hostname = socket.gethostname()
         unique_id = str(uuid.uuid4())[:8]
-        return f"otel-python-{hostname}-{unique_id}"
+        return f"otel-python-{unique_id}"
     
     def _ensure_log_group_exists(self):
         """Ensure the log group exists, create if it doesn't."""
@@ -243,139 +208,359 @@ class CloudWatchEMFExporter(MetricExporter):
         
         return self.UNIT_MAPPING.get(unit, unit)
     
-    def _parse_attributes(self, attributes: Attributes) -> Dict[str, Any]:
-        """Parse and process metric attributes."""
-        parsed = {}
-        
-        for key, value in attributes.items():
-            # Handle JSON-encoded values if enabled
-            if self.parse_json_encoded_attr_values and isinstance(value, str):
-                try:
-                    # Try to parse as JSON
-                    if value.startswith('{') or value.startswith('['):
-                        parsed_value = json.loads(value)
-                        if isinstance(parsed_value, dict):
-                            # Flatten nested dictionaries
-                            for nested_key, nested_value in parsed_value.items():
-                                new_key = f"{key}.{nested_key}"
-                                parsed[new_key] = str(nested_value)
-                        else:
-                            parsed[key] = str(value)
-                    else:
-                        parsed[key] = str(value)
-                except json.JSONDecodeError:
-                    parsed[key] = str(value)
-            else:
-                parsed[key] = str(value)
-        
-        return parsed
-    
     def _get_dimension_names(self, attributes: Dict[str, Any]) -> List[str]:
         """Extract dimension names from attributes."""
         # Implement dimension selection logic
         # For now, use all attributes as dimensions
         return list(attributes.keys())
     
-    def _match_metric_declaration(self, metric_name: str, attributes: Dict[str, Any]) -> Optional[Dict]:
-        """Match metric against metric declarations."""
-        for declaration in self.metric_declarations:
-            # Check if metric name matches
-            if "include" in declaration and metric_name in declaration["include"]:
-                return declaration
-            if "exclude" in declaration and metric_name in declaration["exclude"]:
-                continue
+    def _get_attributes_key(self, attributes: Dict[str, Any]) -> str:
+        """
+        Create a hashable key from attributes for grouping metrics.
         
-        return None
+        Args:
+            attributes: The attributes dictionary
+            
+        Returns:
+            A string representation of sorted attributes key-value pairs
+        """
+        # Sort the attributes to ensure consistent keys
+        sorted_attrs = sorted(attributes.items())
+        # Create a string representation of the attributes
+        return str(sorted_attrs)
     
-    def _create_emf_log(self, metric_records, resource: Resource) -> Dict:
-        """Create EMF log dictionary from metric records."""
+    def _normalize_timestamp(self, timestamp_ns: int) -> int:
+        """
+        Normalize a nanosecond timestamp to milliseconds for CloudWatch.
+        
+        Args:
+            timestamp_ns: Timestamp in nanoseconds
+            
+        Returns:
+            Timestamp in milliseconds
+        """
+        # Convert from nanoseconds to milliseconds
+        return timestamp_ns // 1_000_000
+    
+    def _create_metric_record(self, metric_name: str, metric_unit: str, metric_description: str) -> Any:
+        """Create a base metric record with instrument information.
+        
+        Args:
+            metric_name: Name of the metric
+            metric_unit: Unit of the metric
+            metric_description: Description of the metric
+            
+        Returns:
+            A base metric record object
+        """
+        record = type('MetricRecord', (), {})()
+        record.instrument = type('Instrument', (), {})()
+        record.instrument.name = metric_name
+        record.instrument.unit = metric_unit
+        record.instrument.description = metric_description
+        
+        return record
+    
+    def _convert_gauge(self, metric, dp) -> Tuple[Any, int]:
+        """Convert a Gauge metric datapoint to a metric record.
+        
+        Args:
+            metric: The metric object
+            dp: The datapoint to convert
+            
+        Returns:
+            Tuple of (metric record, timestamp in ms)
+        """
+        # Create base record
+        record = self._create_metric_record(metric.name, metric.unit, metric.description)
+        
+        # Set timestamp
+        timestamp_ms = self._normalize_timestamp(dp.time_unix_nano) if hasattr(dp, 'time_unix_nano') else int(time.time() * 1000)
+        record.timestamp = timestamp_ms
+
+        # Set attributes
+        record.attributes = dp.attributes
+        
+        # For Gauge, set the value directly
+        record.value = dp.value
+        
+        return record, timestamp_ms
+    
+    def _convert_sum(self, metric, dp) -> Tuple[Any, int]:
+        """Convert a Sum metric datapoint to a metric record.
+        
+        Args:
+            metric: The metric object
+            dp: The datapoint to convert
+            
+        Returns:
+            Tuple of (metric record, timestamp in ms)
+        """
+        # Create base record
+        record = self._create_metric_record(metric.name, metric.unit, metric.description)
+        
+        # Set timestamp
+        timestamp_ms = self._normalize_timestamp(dp.time_unix_nano) if hasattr(dp, 'time_unix_nano') else int(time.time() * 1000)
+        record.timestamp = timestamp_ms
+
+        # Set attributes
+        record.attributes = dp.attributes
+        
+        # For Sum, set the sum_data
+        record.value = dp.value
+        
+        return record, timestamp_ms
+    
+
+    def _convert_histogram(self, metric, dp) -> Tuple[Any, int]:
+        """Convert a Histogram metric datapoint to a metric record.
+
+        https://github.com/mircohacker/opentelemetry-collector-contrib/blob/main/exporter/awsemfexporter/datapoint.go#L148
+        
+        Args:
+            metric: The metric object
+            dp: The datapoint to convert
+            
+        Returns:
+            Tuple of (metric record, timestamp in ms)
+        """
+        # Create base record
+        record = self._create_metric_record(metric.name, metric.unit, metric.description)
+        
+        # Set timestamp
+        timestamp_ms = self._normalize_timestamp(dp.time_unix_nano) if hasattr(dp, 'time_unix_nano') else int(time.time() * 1000)
+        record.timestamp = timestamp_ms
+        
+        # Set attributes
+        record.attributes = dp.attributes
+        
+        # For Histogram, set the histogram_data
+        record.value = {
+            "Count": dp.count,
+            "Sum": dp.sum,
+            "Min": dp.min,
+            "Max": dp.max
+        }
+        
+        return record, timestamp_ms
+    
+    def _convert_exp_histogram(self, metric, dp) -> Tuple[Any, int]:
+        """
+        Convert an ExponentialHistogram metric datapoint to a metric record.
+        
+        This function follows the logic of CalculateDeltaDatapoints in the Go implementation,
+        converting exponential buckets to their midpoint values.
+        
+        Args:
+            metric: The metric object
+            dp: The datapoint to convert
+            
+        Returns:
+            Tuple of (metric record, timestamp in ms)
+        """
+        import math
+        
+        # Create base record
+        record = self._create_metric_record(metric.name, metric.unit, metric.description)
+        
+        # Set timestamp
+        timestamp_ms = self._normalize_timestamp(dp.time_unix_nano) if hasattr(dp, 'time_unix_nano') else int(time.time() * 1000)
+        record.timestamp = timestamp_ms
+        
+        # Set attributes
+        record.attributes = dp.attributes
+        
+        # Initialize arrays for values and counts
+        array_values = []
+        array_counts = []
+        
+        # Get scale
+        scale = dp.scale
+        # Calculate base using the formula: 2^(2^(-scale))
+        base = math.pow(2, math.pow(2, float(-scale)))
+        
+        # Process positive buckets
+        if hasattr(dp, 'positive') and hasattr(dp.positive, 'bucket_counts') and dp.positive.bucket_counts:
+            positive_offset = getattr(dp.positive, 'offset', 0)
+            positive_bucket_counts = dp.positive.bucket_counts
+            
+            bucket_begin = 0
+            bucket_end = 0
+            
+            for i, count in enumerate(positive_bucket_counts):
+                index = i + positive_offset
+                
+                if bucket_begin == 0:
+                    bucket_begin = math.pow(base, float(index))
+                else:
+                    bucket_begin = bucket_end
+                    
+                bucket_end = math.pow(base, float(index + 1))
+                
+                # Calculate midpoint value of the bucket
+                metric_val = (bucket_begin + bucket_end) / 2
+                
+                # Only include buckets with positive counts
+                if count > 0:
+                    array_values.append(metric_val)
+                    array_counts.append(float(count))
+        
+        # Process zero bucket
+        zero_count = getattr(dp, 'zero_count', 0)
+        if zero_count > 0:
+            array_values.append(0)
+            array_counts.append(float(zero_count))
+        
+        # Process negative buckets
+        if hasattr(dp, 'negative') and hasattr(dp.negative, 'bucket_counts') and dp.negative.bucket_counts:
+            negative_offset = getattr(dp.negative, 'offset', 0)
+            negative_bucket_counts = dp.negative.bucket_counts
+            
+            bucket_begin = 0
+            bucket_end = 0
+            
+            for i, count in enumerate(negative_bucket_counts):
+                index = i + negative_offset
+                
+                if bucket_end == 0:
+                    bucket_end = -math.pow(base, float(index))
+                else:
+                    bucket_end = bucket_begin
+                    
+                bucket_begin = -math.pow(base, float(index + 1))
+                
+                # Calculate midpoint value of the bucket
+                metric_val = (bucket_begin + bucket_end) / 2
+                
+                # Only include buckets with positive counts
+                if count > 0:
+                    array_values.append(metric_val)
+                    array_counts.append(float(count))
+        
+        # Set the histogram data in the format expected by CloudWatch EMF
+        record.value = {
+            "Values": array_values,
+            "Counts": array_counts,
+            "Count": dp.count,
+            "Sum": dp.sum,
+            "Max": dp.max,
+            "Min": dp.min
+        }
+        
+        return record, timestamp_ms
+    
+    def _group_by_attributes_and_timestamp(self, record, timestamp_ms) -> Tuple[str, int]:
+        """Group metric record by attributes and timestamp.
+        
+        Args:
+            record: The metric record
+            timestamp_ms: The timestamp in milliseconds
+            
+        Returns:
+            A tuple key for grouping
+        """
+        # Create a key for grouping based on attributes
+        attrs_key = self._get_attributes_key(record.attributes)
+        return (attrs_key, timestamp_ms)
+    
+    def _create_emf_log(self, metric_records, resource: Resource, timestamp: Optional[int] = None) -> Dict:
+        """
+        Create EMF log dictionary from metric records.
+        
+        Since metric_records is already grouped by attributes, this function
+        creates a single EMF log for all records.
+        """
         # Start with base structure
         emf_log = {
             "_aws": {
-                "Namespace": self.namespace,
-                "Timestamp": int(time.time() * 1000),
+                "Timestamp": timestamp or int(time.time() * 1000),
                 "CloudWatchMetrics": []
             }
         }
         
-        # Group metrics by dimensions
-        dimension_groups = defaultdict(list)
-        dimension_values = defaultdict(dict)
+        # Add resource attributes to EMF log but not as dimensions
+        if resource and resource.attributes:
+            for key, value in resource.attributes.items():
+                emf_log[f"resource.{key}"] = str(value)
         
+        # Initialize collections for dimensions and metrics
+        all_attributes = {}
+        metric_definitions = []
+        
+        # Process each metric record
         for record in metric_records:
+            # Collect attributes from all records (they should be the same for all records in the group)
+            if hasattr(record, 'attributes') and record.attributes:
+                for key, value in record.attributes.items():
+                    all_attributes[key] = value
+                    
             metric_name = self._get_metric_name(record)
             unit = self._get_unit(record.instrument)
             
-            # Process attributes
-            attributes = self._parse_attributes(record.attributes or {})
-            
-            # Add resource attributes
-            if resource and resource.attributes:
-                for key, value in resource.attributes.items():
-                    if key not in attributes:
-                        attributes[f"resource.{key}"] = str(value)
-            
-            # Get dimensions for this metric
-            dimension_names = self._get_dimension_names(attributes)
-            dimension_key = tuple(sorted(dimension_names))
-            
-            # Store dimension values
-            for name in dimension_names:
-                dimension_values[dimension_key][name] = attributes.get(name, "")
-            
-            # Create metric data dict directly (no custom class)
+            # Create metric data dict
             metric_data = {}
             if unit:
                 metric_data["Unit"] = unit
+
+            # TODO - add metric value into record for all kinds of metric type
+            emf_log[metric_name] = record.value
             
             # Process different types of aggregations
             if hasattr(record, 'histogram_data'):
                 # Histogram
                 histogram = record.histogram_data
                 if histogram.count > 0:
-                    values = list(histogram.bucket_boundaries) if hasattr(histogram, 'bucket_boundaries') else []
-                    counts = list(histogram.bucket_counts) if hasattr(histogram, 'bucket_counts') else []
-                    # Store values directly in emf_log
-                    emf_log[metric_name] = values[0] if values else 0
-                    metric_data["Values"] = values
-                    metric_data["Counts"] = counts
+                    bucket_boundaries = list(histogram.bucket_boundaries) if hasattr(histogram, 'bucket_boundaries') else []
+                    bucket_counts = list(histogram.bucket_counts) if hasattr(histogram, 'bucket_counts') else []
+                    
+                    # Format for CloudWatch EMF histogram format
+                    emf_log[metric_name] = {
+                        "Values": bucket_boundaries,
+                        "Counts": bucket_counts,
+                        "Max": 0,
+                        "Min": 0,
+                        "Count": 1,
+                        "Sum": 0
+                    }
             elif hasattr(record, 'sum_data'):
                 # Counter/UpDownCounter
                 sum_data = record.sum_data
                 # Store value directly in emf_log
                 emf_log[metric_name] = sum_data.value
-                metric_data["Value"] = sum_data.value
             else:
                 # Other aggregations (e.g., LastValue)
                 if hasattr(record, 'value'):
                     # Store value directly in emf_log
                     emf_log[metric_name] = record.value
-                    metric_data["Value"] = record.value
             
-            # Add to dimension group with the metric definition
-            dimension_groups[dimension_key].append({
+            # Add to metric definitions list
+            metric_definitions.append({
                 "Name": metric_name,
                 **metric_data
             })
         
-        # Build CloudWatch Metrics structure
-        for dimension_key, metrics in dimension_groups.items():
-            # Add CloudWatch Metrics entry
+        # Get dimension names from collected attributes
+        dimension_names = self._get_dimension_names(all_attributes)
+        
+        # Add attribute values to the root of the EMF log
+        for name, value in all_attributes.items():
+            emf_log[name] = str(value)
+        
+        # Add the single dimension set to CloudWatch Metrics if we have dimensions and metrics
+        if dimension_names and metric_definitions:
             emf_log["_aws"]["CloudWatchMetrics"].append({
                 "Namespace": self.namespace,
-                "Dimensions": [list(dimension_key)],
-                "Metrics": metrics
+                "Dimensions": [dimension_names],
+                "Metrics": metric_definitions
             })
-            
-            # Add dimension values to the root of the EMF log
-            for name, value in dimension_values[dimension_key].items():
-                emf_log[name] = value
         
         return emf_log
     
     def export(self, metrics_data: MetricsData, timeout_millis: Optional[int] = None, **kwargs) -> MetricExportResult:
         """
         Export metrics as EMF logs to CloudWatch.
+        
+        Groups metrics by attributes and timestamp before creating EMF logs.
         
         Args:
             metrics_data: MetricsData containing resource metrics and scope metrics
@@ -386,7 +571,13 @@ class CloudWatchEMFExporter(MetricExporter):
             MetricExportResult indicating success or failure
         """
         try:
-            logger.debug("Starting to export metrics data")
+            # Import metric data types within the method to avoid circular imports
+            from opentelemetry.sdk.metrics.export import (
+                Gauge, Sum, Histogram, ExponentialHistogram
+            )
+            
+            logger.info("Starting to export metrics data")
+            print("Starting to export metrics data")
             if not metrics_data.resource_metrics:
                 return MetricExportResult.SUCCESS
             
@@ -394,56 +585,66 @@ class CloudWatchEMFExporter(MetricExporter):
             for resource_metrics in metrics_data.resource_metrics:
                 # The resource is now part of each resource_metrics object
                 resource = resource_metrics.resource
+                print(f"Starting to export scope metrics data size: {len(resource_metrics.scope_metrics)}")
                 
                 for scope_metrics in resource_metrics.scope_metrics:
-                    metric_records = []
+                    # Dictionary to group metrics by attributes and timestamp
+                    # Key: (attributes_key, timestamp_ms)
+                    # Value: list of metric records
+                    grouped_metrics = defaultdict(list)
+                    print(f"Starting to export metrics data size: {len(scope_metrics.metrics)}")
                     
                     # Process all metrics in this scope
                     for metric in scope_metrics.metrics:
                         # Convert metrics to a format compatible with _create_emf_log
                         # Access data points through metric.data.data_points
                         if hasattr(metric, 'data') and hasattr(metric.data, 'data_points'):
-                            for data_point in metric.data.data_points:
-                                # Create a record-like object for compatibility
-                                record = type('MetricRecord', (), {})()
-                                record.instrument = type('Instrument', (), {})()
-                                record.instrument.name = metric.name
-                                record.instrument.unit = metric.unit
-                                record.instrument.description = metric.description
-                                
-                                # Set attributes
-                                record.attributes = data_point.attributes
-                                
-                                # Set appropriate data based on metric type
-                                if hasattr(data_point, 'value'):
-                                    # Sum data (Counter, UpDownCounter)
-                                    record.sum_data = type('SumData', (), {})()
-                                    record.sum_data.value = data_point.value
-                                elif hasattr(data_point, 'bucket_counts'):
-                                    # Histogram data
-                                    record.histogram_data = type('HistogramData', (), {})()
-                                    record.histogram_data.count = data_point.count
-                                    record.histogram_data.sum = getattr(data_point, 'sum', 0)
-                                    record.histogram_data.bucket_counts = data_point.bucket_counts
-                                    record.histogram_data.bucket_boundaries = data_point.explicit_bounds
-                                else:
-                                    # Last value data (Gauge)
-                                    record.value = getattr(data_point, 'value', 0)
-                                
-                                metric_records.append(record)
+                            # Process different metric types
+                            if isinstance(metric.data, Gauge):
+                                for dp in metric.data.data_points:
+                                    record, timestamp_ms = self._convert_gauge(metric, dp)
+                                    group_key = self._group_by_attributes_and_timestamp(record, timestamp_ms)
+                                    grouped_metrics[group_key].append(record)
+                                    
+                            elif isinstance(metric.data, Sum):
+                                for dp in metric.data.data_points:
+                                    record, timestamp_ms = self._convert_sum(metric, dp)
+                                    group_key = self._group_by_attributes_and_timestamp(record, timestamp_ms)
+                                    grouped_metrics[group_key].append(record)
+                                    
+                            elif isinstance(metric.data, Histogram):
+                                for dp in metric.data.data_points:
+                                    record, timestamp_ms = self._convert_histogram(metric, dp)
+                                    group_key = self._group_by_attributes_and_timestamp(record, timestamp_ms)
+                                    grouped_metrics[group_key].append(record)
+                                    
+                            elif isinstance(metric.data, ExponentialHistogram):
+                                for dp in metric.data.data_points:
+                                    record, timestamp_ms = self._convert_exp_histogram(metric, dp)
+                                    group_key = self._group_by_attributes_and_timestamp(record, timestamp_ms)
+                                    grouped_metrics[group_key].append(record)
+                                    
+                            else:
+                                logger.warning("Unsupported Metric Type: %s", type(metric.data))
+                                continue  # Skip this metric but continue processing others
                     
-                    if metric_records:
-                        # Create EMF log for this batch of metrics - now returns a dict directly
-                        emf_log_dict = self._create_emf_log(metric_records, resource)
-                        
-                        # Convert to JSON - no need for to_dict() conversion
-                        log_event = {
-                            "message": json.dumps(emf_log_dict),
-                            "timestamp": int(time.time() * 1000)
-                        }
-                        logger.info(f"EMF Log Event: {log_event['message']}")
-                        # Send to CloudWatch Logs
-                        self._send_log_event(log_event)
+                    # Now process each group separately to create one EMF log per group
+                    for (attrs_key, timestamp_ms), metric_records in grouped_metrics.items():
+                        if metric_records:
+                            logger.debug(f"Creating EMF log for group with {len(metric_records)} metrics. "
+                                        f"Timestamp: {timestamp_ms}, Attributes: {attrs_key[:100]}...")
+                            
+                            # Create EMF log for this batch of metrics with the group's timestamp
+                            emf_log_dict = self._create_emf_log(metric_records, resource, timestamp_ms)
+                            
+                            # Convert to JSON
+                            log_event = {
+                                "message": json.dumps(emf_log_dict),
+                                "timestamp": timestamp_ms
+                            }
+                            
+                            # Send to CloudWatch Logs
+                            self._send_log_event(log_event)
             
             return MetricExportResult.SUCCESS
             
@@ -504,9 +705,18 @@ class CloudWatchEMFExporter(MetricExporter):
         # No buffering in this implementation, so always return True
         return True
     
-    def shutdown(self):
-        """Shutdown the exporter."""
-        pass
+    def shutdown(self, timeout_millis=None, **kwargs):
+        """
+        Shutdown the exporter.
+        Override to handle timeout and other keyword arguments, but do nothing.
+        
+        Args:
+            timeout_millis: Ignored timeout in milliseconds
+            **kwargs: Ignored additional keyword arguments
+        """
+        # Intentionally do nothing
+        logger.debug(f"CloudWatchEMFExporter shutdown called with timeout_millis={timeout_millis} - no action taken")
+        return True
 
 
 def create_emf_exporter(
@@ -531,12 +741,7 @@ def create_emf_exporter(
     Returns:
         Configured CloudWatchEMFExporter instance
     """
-    # Import all instrument types for temporality dictionary
-    from opentelemetry.sdk.metrics import (
-        Counter, Histogram, ObservableCounter, 
-        ObservableGauge, ObservableUpDownCounter, UpDownCounter
-    )
-    
+
     # Set up temporality preference - always use DELTA for CloudWatch
     temporality_dict = {
         Counter: AggregationTemporality.DELTA,
@@ -574,6 +779,7 @@ if __name__ == "__main__":
     
     # Setup basic logging
     logging.basicConfig(level=logging.DEBUG)
+
     
     # Create a resource
     resource = Resource.create({
@@ -584,11 +790,13 @@ if __name__ == "__main__":
     
     # Create EMF exporter with the helper function
     emf_exporter = create_emf_exporter(
-        namespace="MyApplication",
+        namespace="MyApplication1",
         log_group_name="/aws/otel/my-app",
         aws_region="us-east-1",
         debug=True
     )
+
+    os.environ.setdefault("OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION", "base2_exponential_bucket_histogram")
     
     # Create metric reader
     metric_reader = PeriodicExportingMetricReader(
@@ -607,6 +815,7 @@ if __name__ == "__main__":
     
     # Create a meter
     meter = meter_provider.get_meter("my-app-meter")
+
     
     # Create some metrics
     request_counter = meter.create_counter(
@@ -621,25 +830,25 @@ if __name__ == "__main__":
         unit="s"
     )
     
-    # Use the metrics in a loop to simulate traffic
-    print("Generating metrics. Press Ctrl+C to stop...")
+    # Use the metrics in a loop to simulate traffic with different attribute sets
+    print("Generating metrics with different attribute sets. Press Ctrl+C to stop...")
     try:
         while True:
-            # Simulate HTTP GET request
-            request_counter.add(1, {"method1": "GET", "status": "200"})
+            # Group 1: Method GET, Status 200
+            request_counter.add(1, {"method": "GET", "status": "200"})
             request_duration.record(0.1 + (0.5 * random.random()), {"method": "GET", "status": "200"})
             
-            # Simulate HTTP POST request
+            # Group 2: Method POST, Status 201
             request_counter.add(1, {"method": "POST", "status": "201"})
-            request_duration.record(0.2 + (0.7 * random.random()), {"method": "POST", "status": "201"})
+            # request_duration.record(0.2 + (0.7 * random.random()), {"method": "POST", "status": "201"})
             
-            # Simulate some errors
-            if random.random() < 0.1:  # 10% error rate
-                request_counter.add(1, {"method3": "GET", "status": "500"})
-                request_duration.record(1.0 + (1.0 * random.random()), {"method": "GET", "status": "500"})
+            # Group 3: Method GET, Status 500 (error case)
+            # if random.random() < 0.1:  # 10% error rate
+            #     request_counter.add(1, {"method": "GET", "status": "500"})
+            #     request_duration.record(1.0 + (1.0 * random.random()), {"method": "GET", "status": "500"})
             
             # Sleep between 100ms and 300ms
-            time.sleep(0.1 + (0.2 * random.random()))
+            time.sleep(3)
     except KeyboardInterrupt:
         print("\nStopping metric generation.")
         # Force flush metrics
