@@ -3,14 +3,15 @@
 # Modifications Copyright The OpenTelemetry Authors. Licensed under the Apache License 2.0 License.
 import os
 import re
-from logging import Logger, getLogger
-from typing import ClassVar, Dict, List, Type, Union
+from logging import NOTSET, Logger, getLogger
+from typing import ClassVar, Dict, List, NamedTuple, Optional, Type, Union
 
 from importlib_metadata import version
 from typing_extensions import override
 
 from amazon.opentelemetry.distro._aws_attribute_keys import AWS_LOCAL_SERVICE
 from amazon.opentelemetry.distro._aws_resource_attribute_configurator import get_service_attribute
+from amazon.opentelemetry.distro._utils import is_agent_observability_enabled
 from amazon.opentelemetry.distro.always_record_sampler import AlwaysRecordSampler
 from amazon.opentelemetry.distro.attribute_propagating_span_processor_builder import (
     AttributePropagatingSpanProcessorBuilder,
@@ -21,11 +22,16 @@ from amazon.opentelemetry.distro.aws_metric_attributes_span_exporter_builder imp
     AwsMetricAttributesSpanExporterBuilder,
 )
 from amazon.opentelemetry.distro.aws_span_metrics_processor_builder import AwsSpanMetricsProcessorBuilder
-from amazon.opentelemetry.distro.otlp_aws_span_exporter import OTLPAwsSpanExporter
+from amazon.opentelemetry.distro.exporter.otlp.aws.logs.aws_batch_log_record_processor import AwsBatchLogRecordProcessor
+from amazon.opentelemetry.distro.exporter.otlp.aws.logs.otlp_aws_logs_exporter import OTLPAwsLogExporter
+from amazon.opentelemetry.distro.exporter.otlp.aws.traces.otlp_aws_span_exporter import OTLPAwsSpanExporter
+from amazon.opentelemetry.distro.exporter.otlp.aws.metrics.otlp_aws_emf_exporter import CloudWatchEMFExporter
 from amazon.opentelemetry.distro.otlp_udp_exporter import OTLPUdpSpanExporter
 from amazon.opentelemetry.distro.sampler.aws_xray_remote_sampler import AwsXRayRemoteSampler
 from amazon.opentelemetry.distro.scope_based_exporter import ScopeBasedPeriodicExportingMetricReader
 from amazon.opentelemetry.distro.scope_based_filtering_view import ScopeBasedRetainingView
+from opentelemetry._logs import get_logger_provider, set_logger_provider
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter as OTLPHttpOTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.metrics import set_meter_provider
@@ -36,9 +42,10 @@ from opentelemetry.sdk._configuration import (
     _import_exporters,
     _import_id_generator,
     _import_sampler,
-    _init_logging,
     _OTelSDKConfigurator,
 )
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogExporter
 from opentelemetry.sdk.environment_variables import (
     _OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED,
     OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
@@ -78,17 +85,35 @@ APPLICATION_SIGNALS_RUNTIME_ENABLED_CONFIG = "OTEL_AWS_APPLICATION_SIGNALS_RUNTI
 DEPRECATED_APP_SIGNALS_EXPORTER_ENDPOINT_CONFIG = "OTEL_AWS_APP_SIGNALS_EXPORTER_ENDPOINT"
 APPLICATION_SIGNALS_EXPORTER_ENDPOINT_CONFIG = "OTEL_AWS_APPLICATION_SIGNALS_EXPORTER_ENDPOINT"
 METRIC_EXPORT_INTERVAL_CONFIG = "OTEL_METRIC_EXPORT_INTERVAL"
+OTEL_LOGS_EXPORTER = "OTEL_LOGS_EXPORTER"
 DEFAULT_METRIC_EXPORT_INTERVAL = 60000.0
 AWS_LAMBDA_FUNCTION_NAME_CONFIG = "AWS_LAMBDA_FUNCTION_NAME"
 AWS_XRAY_DAEMON_ADDRESS_CONFIG = "AWS_XRAY_DAEMON_ADDRESS"
 OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED_CONFIG = "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED"
 SYSTEM_METRICS_INSTRUMENTATION_SCOPE_NAME = "opentelemetry.instrumentation.system_metrics"
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
-XRAY_OTLP_ENDPOINT_PATTERN = r"https://xray\.([a-z0-9-]+)\.amazonaws\.com/v1/traces$"
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+OTEL_EXPORTER_OTLP_LOGS_HEADERS = "OTEL_EXPORTER_OTLP_LOGS_HEADERS"
+
+AGENT_OBSERVABILITY_ENABLED = "AGENT_OBSERVABILITY_ENABLED"
+
+AWS_TRACES_OTLP_ENDPOINT_PATTERN = r"https://xray\.([a-z0-9-]+)\.amazonaws\.com/v1/traces$"
+AWS_LOGS_OTLP_ENDPOINT_PATTERN = r"https://logs\.([a-z0-9-]+)\.amazonaws\.com/v1/logs$"
+
+AWS_OTLP_LOGS_GROUP_HEADER = "x-aws-log-group"
+AWS_OTLP_LOGS_STREAM_HEADER = "x-aws-log-stream"
+AWS_EMF_METRICS_NAMESPACE = "x-aws-metric-namespace"
+
 # UDP package size is not larger than 64KB
 LAMBDA_SPAN_EXPORT_BATCH_SIZE = 10
 
 _logger: Logger = getLogger(__name__)
+
+class OtlpLogHeaderSetting(NamedTuple):
+    log_group: Optional[str]
+    log_stream: Optional[str] 
+    namespace: Optional[str]
+    is_valid: bool
 
 
 class AwsOpenTelemetryConfigurator(_OTelSDKConfigurator):
@@ -119,6 +144,8 @@ class AwsOpenTelemetryConfigurator(_OTelSDKConfigurator):
 # Long term, we wish to contribute this to upstream to improve initialization customizability and reduce dependency on
 # internal logic.
 def _initialize_components():
+
+    is_emf_enabled = _check_emf_exporter_enabled()
     trace_exporters, metric_exporters, log_exporters = _import_exporters(
         _get_exporter_names("traces"),
         _get_exporter_names("metrics"),
@@ -148,16 +175,46 @@ def _initialize_components():
     sampler_name = _get_sampler()
     sampler = _custom_import_sampler(sampler_name, resource)
 
+    logging_enabled = os.getenv(_OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, "false")
+    if logging_enabled.strip().lower() == "true":
+        _init_logging(log_exporters, resource)
+
     _init_tracing(
         exporters=trace_exporters,
         id_generator=id_generator,
         sampler=sampler,
         resource=resource,
     )
-    _init_metrics(metric_exporters, resource)
-    logging_enabled = os.getenv(_OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, "false")
-    if logging_enabled.strip().lower() == "true":
-        _init_logging(log_exporters, resource)
+    _init_metrics(
+        exporters_or_readers=metric_exporters, 
+        resource=resource, 
+        is_emf_enabled=is_emf_enabled)
+
+def _init_logging(
+    exporters: Dict[str, Type[LogExporter]],
+    resource: Resource = None,
+):
+
+    # Provides a default OTLP log exporter when the environment is not set.
+    # This is the behavior for the logs exporters for other languages.
+    if not exporters and os.environ.get(OTEL_LOGS_EXPORTER) is None:
+        exporters = {"otlp": OTLPLogExporter}
+
+    provider = LoggerProvider(resource=resource)
+    set_logger_provider(provider)
+
+    for _, exporter_class in exporters.items():
+        exporter_args: Dict[str, any] = {}
+        log_exporter = _customize_logs_exporter(exporter_class(**exporter_args), resource)
+
+        if isinstance(log_exporter, OTLPAwsLogExporter):
+            provider.add_log_record_processor(AwsBatchLogRecordProcessor(exporter=log_exporter))
+        else:
+            provider.add_log_record_processor(BatchLogRecordProcessor(exporter=log_exporter))
+
+    handler = LoggingHandler(level=NOTSET, logger_provider=provider)
+
+    getLogger().addHandler(handler)
 
 
 def _init_tracing(
@@ -177,7 +234,7 @@ def _init_tracing(
     for _, exporter_class in exporters.items():
         exporter_args: Dict[str, any] = {}
         span_exporter: SpanExporter = exporter_class(**exporter_args)
-        span_exporter = _customize_exporter(span_exporter, resource)
+        span_exporter = _customize_span_exporter(span_exporter, resource)
         trace_provider.add_span_processor(
             BatchSpanProcessor(span_exporter=span_exporter, max_export_batch_size=_span_export_batch_size())
         )
@@ -190,19 +247,19 @@ def _init_tracing(
 def _init_metrics(
     exporters_or_readers: Dict[str, Union[Type[MetricExporter], Type[MetricReader]]],
     resource: Resource = None,
+    is_emf_enabled: bool = False
 ):
     metric_readers = []
     views = []
 
     for _, exporter_or_reader_class in exporters_or_readers.items():
         exporter_args = {}
-
         if issubclass(exporter_or_reader_class, MetricReader):
             metric_readers.append(exporter_or_reader_class(**exporter_args))
         else:
             metric_readers.append(PeriodicExportingMetricReader(exporter_or_reader_class(**exporter_args)))
 
-    _customize_metric_exporters(metric_readers, views)
+    _customize_metric_exporters(metric_readers, views, is_emf_enabled)
 
     provider = MeterProvider(resource=resource, metric_readers=metric_readers, views=views)
     set_meter_provider(provider)
@@ -312,19 +369,22 @@ def _customize_sampler(sampler: Sampler) -> Sampler:
     return AlwaysRecordSampler(sampler)
 
 
-def _customize_exporter(span_exporter: SpanExporter, resource: Resource) -> SpanExporter:
+def _customize_span_exporter(span_exporter: SpanExporter, resource: Resource) -> SpanExporter:
+    traces_endpoint = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
     if _is_lambda_environment():
         # Override OTLP http default endpoint to UDP
-        if isinstance(span_exporter, OTLPSpanExporter) and os.getenv(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) is None:
+        if isinstance(span_exporter, OTLPSpanExporter) and traces_endpoint is None:
             traces_endpoint = os.environ.get(AWS_XRAY_DAEMON_ADDRESS_CONFIG, "127.0.0.1:2000")
             span_exporter = OTLPUdpSpanExporter(endpoint=traces_endpoint)
 
-    if is_xray_otlp_endpoint(os.environ.get(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)):
-        # TODO: Change this url once doc writer has added a section for using SigV4 without collector
-        _logger.info("Detected using AWS OTLP XRay Endpoint.")
+    if _is_aws_otlp_endpoint(traces_endpoint, "xray"):
+        _logger.info("Detected using AWS OTLP Traces Endpoint.")
 
         if isinstance(span_exporter, OTLPSpanExporter):
-            span_exporter = OTLPAwsSpanExporter(endpoint=os.getenv(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT))
+            if is_agent_observability_enabled():
+                span_exporter = OTLPAwsSpanExporter(endpoint=traces_endpoint, logger_provider=get_logger_provider())
+            else:
+                span_exporter = OTLPAwsSpanExporter(endpoint=traces_endpoint)
 
         else:
             _logger.warning(
@@ -336,6 +396,26 @@ def _customize_exporter(span_exporter: SpanExporter, resource: Resource) -> Span
         return span_exporter
 
     return AwsMetricAttributesSpanExporterBuilder(span_exporter, resource).build()
+
+
+def _customize_logs_exporter(log_exporter: LogExporter, resource: Resource) -> LogExporter:
+    logs_endpoint = os.environ.get(OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)
+
+    if _is_aws_otlp_endpoint(logs_endpoint, "logs"):
+        _logger.info("Detected using AWS OTLP Logs Endpoint.")
+
+        if isinstance(log_exporter, OTLPLogExporter) and _validate_logs_headers().is_valid:
+            # Setting default compression mode to Gzip as this is the behavior in upstream's
+            # collector otlp http exporter:
+            # https://github.com/open-telemetry/opentelemetry-collector/tree/main/exporter/otlphttpexporter
+            return OTLPAwsLogExporter(endpoint=logs_endpoint)
+
+        _logger.warning(
+            "Improper configuration see: please export/set "
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf and OTEL_LOGS_EXPORTER=otlp"
+        )
+
+    return log_exporter
 
 
 def _customize_span_processors(provider: TracerProvider, resource: Resource) -> None:
@@ -368,7 +448,7 @@ def _customize_span_processors(provider: TracerProvider, resource: Resource) -> 
     return
 
 
-def _customize_metric_exporters(metric_readers: List[MetricReader], views: List[View]) -> None:
+def _customize_metric_exporters(metric_readers: List[MetricReader], views: List[View], is_emf_enabled: bool) -> None:
     if _is_application_signals_runtime_enabled():
         _get_runtime_metric_views(views, 0 == len(metric_readers))
 
@@ -379,7 +459,26 @@ def _customize_metric_exporters(metric_readers: List[MetricReader], views: List[
             registered_scope_names={SYSTEM_METRICS_INSTRUMENTATION_SCOPE_NAME},
         )
         metric_readers.append(scope_based_periodic_exporting_metric_reader)
+    
+    if is_emf_enabled:
+        headers_result = _validate_logs_headers()
+        if not headers_result.log_group:
+            _logger.warning(
+                "Log group is not set. Set Log Group with OTEL_EXPORTER_OTLP_LOGS_HEADERS=<EMF Log Group>"
+            )
+            return
+        print("config EMF Exporter")
 
+        emf_exporter = create_emf_exporter(
+            log_group_name=headers_result.log_group,
+            log_stream_name=headers_result.log_stream,
+            namespace=headers_result.namespace
+        )
+        metric_reader = PeriodicExportingMetricReader(
+            exporter=emf_exporter,
+            export_interval_millis=_get_metric_export_interval()
+        )
+        metric_readers.append(metric_reader)
 
 def _get_runtime_metric_views(views: List[View], retain_runtime_only: bool) -> None:
     runtime_metrics_scope_name = SYSTEM_METRICS_INSTRUMENTATION_SCOPE_NAME
@@ -458,12 +557,63 @@ def _is_lambda_environment():
     return AWS_LAMBDA_FUNCTION_NAME_CONFIG in os.environ
 
 
-def is_xray_otlp_endpoint(otlp_endpoint: str = None) -> bool:
-    """Is the given endpoint the XRay OTLP endpoint?"""
+def _is_aws_otlp_endpoint(otlp_endpoint: str = None, service: str = "xray") -> bool:
+    """Is the given endpoint an AWS OTLP endpoint?"""
+
+    pattern = AWS_TRACES_OTLP_ENDPOINT_PATTERN if service == "xray" else AWS_LOGS_OTLP_ENDPOINT_PATTERN
+
     if not otlp_endpoint:
         return False
 
-    return bool(re.match(XRAY_OTLP_ENDPOINT_PATTERN, otlp_endpoint.lower()))
+    return bool(re.match(pattern, otlp_endpoint.lower()))
+
+
+def _validate_logs_headers() -> OtlpLogHeaderSetting:
+    """
+    Checks if x-aws-log-group and x-aws-log-stream are present in the headers in order to send logs to
+    AWS OTLP Logs endpoint.
+    
+    Returns:
+        LogHeadersResult with log_group, log_stream, namespace and is_valid flag
+    """
+    logs_headers = os.environ.get(OTEL_EXPORTER_OTLP_LOGS_HEADERS)
+    
+    log_group = None
+    log_stream = None 
+    namespace = None
+    
+    if not logs_headers:
+        _logger.warning(
+            "Improper configuration: Please configure the environment variable OTEL_EXPORTER_OTLP_LOGS_HEADERS "
+            "to include x-aws-log-group and x-aws-log-stream"
+        )
+        return OtlpLogHeaderSetting(None, None, None, False)
+    
+    filtered_log_headers_count = 0
+    
+    for pair in logs_headers.split(","):
+        if "=" in pair:
+            split = pair.split("=", 1)
+            key = split[0]
+            value = split[1]
+            if key == AWS_OTLP_LOGS_GROUP_HEADER and value:
+                log_group = value
+                filtered_log_headers_count += 1
+            elif key == AWS_OTLP_LOGS_STREAM_HEADER and value:
+                log_stream = value
+                filtered_log_headers_count += 1
+            elif key == AWS_EMF_METRICS_NAMESPACE and value:
+                namespace = value
+    
+    is_valid = filtered_log_headers_count == 2
+    
+    if not is_valid:
+        _logger.warning(
+            "Improper configuration: Please configure the environment variable OTEL_EXPORTER_OTLP_LOGS_HEADERS "
+            "to have values for x-aws-log-group and x-aws-log-stream"
+        )
+    
+    return OtlpLogHeaderSetting(log_group, log_stream, namespace, is_valid)
 
 
 def _get_metric_export_interval():
@@ -479,6 +629,87 @@ def _get_metric_export_interval():
 def _span_export_batch_size():
     return LAMBDA_SPAN_EXPORT_BATCH_SIZE if _is_lambda_environment() else None
 
+def _check_emf_exporter_enabled() -> bool:
+    """
+    Checks if OTEL_METRICS_EXPORTER contains "awsemf", removes it if present,
+    and updates the environment variable.
+    
+    Returns:
+        bool: True if "awsemf" was found and removed, False otherwise.
+    """
+    # Get the current exporter value
+    exporter_value = os.environ.get("OTEL_METRICS_EXPORTER", "")
+    
+    # Check if it's empty
+    if not exporter_value:
+        return False
+    
+    # Split by comma and convert to list
+    exporters = [exp.strip() for exp in exporter_value.split(",")]
+    
+    # Check if awsemf is in the list
+    if "awsemf" not in exporters:
+        return False
+    
+    # Remove awsemf from the list
+    exporters.remove("awsemf")
+    
+    # Join the remaining exporters and update the environment variable
+    new_value = ",".join(exporters) if exporters else ""
+    
+    # Set the new value (or unset if empty)
+    if new_value:
+        os.environ["OTEL_METRICS_EXPORTER"] = new_value
+    elif "OTEL_METRICS_EXPORTER" in os.environ:
+        del os.environ["OTEL_METRICS_EXPORTER"]
+    
+    return True
+
+def create_emf_exporter(
+    log_group_name: str = None,
+    log_stream_name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    aws_region: Optional[str] = None,
+    **kwargs
+) -> CloudWatchEMFExporter:
+    """
+    Convenience function to create a CloudWatch EMF exporter with DELTA temporality.
+    
+    Args:
+        namespace: CloudWatch namespace for metrics
+        log_group_name: CloudWatch log group name
+        log_stream_name: CloudWatch log stream name (auto-generated if None)
+        aws_region: AWS region (auto-detected if None)
+        **kwargs: Additional arguments passed to the CloudWatchEMFExporter
+        
+    Returns:
+        Configured CloudWatchEMFExporter instance
+    """
+    # Import all instrument types for temporality dictionary
+    from opentelemetry.sdk.metrics import (
+        Counter, Histogram, ObservableCounter, 
+        ObservableGauge, ObservableUpDownCounter, UpDownCounter
+    )
+
+    # Set up temporality preference - always use DELTA for CloudWatch
+    temporality_dict = {
+        Counter: AggregationTemporality.DELTA,
+        Histogram: AggregationTemporality.DELTA,
+        ObservableCounter: AggregationTemporality.DELTA,
+        ObservableGauge: AggregationTemporality.DELTA,
+        ObservableUpDownCounter: AggregationTemporality.DELTA,
+        UpDownCounter: AggregationTemporality.DELTA
+    }
+    
+    # Create and return the exporter
+    return CloudWatchEMFExporter(
+        namespace=namespace,
+        log_group_name=log_group_name,
+        log_stream_name=log_stream_name,
+        aws_region=aws_region,
+        preferred_temporality=temporality_dict,
+        **kwargs
+    )
 
 class ApplicationSignalsExporterProvider:
     _instance: ClassVar["ApplicationSignalsExporterProvider"] = None

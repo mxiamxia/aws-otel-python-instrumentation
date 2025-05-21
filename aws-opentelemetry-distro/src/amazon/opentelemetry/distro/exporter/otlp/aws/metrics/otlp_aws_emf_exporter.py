@@ -119,11 +119,10 @@ class CloudWatchEMFExporter(MetricExporter):
     
     def __init__(
         self,
-        namespace: str = "OTelPython",
-        log_group_name: str = "/aws/otel/python",
+        namespace: str = "default",
+        log_group_name: str = None,
         log_stream_name: Optional[str] = None,
         aws_region: Optional[str] = None,
-        dimension_rollup_option: str = "NoDimensionRollup",
         metric_declarations: Optional[List[Dict]] = None,
         parse_json_encoded_attr_values: bool = True,
         preferred_temporality: Optional[Dict[type, AggregationTemporality]] = None,
@@ -137,7 +136,6 @@ class CloudWatchEMFExporter(MetricExporter):
             log_group_name: CloudWatch log group name
             log_stream_name: CloudWatch log stream name (auto-generated if None)
             aws_region: AWS region (auto-detected if None)
-            dimension_rollup_option: Dimension rollup behavior
             metric_declarations: Optional metric declarations for filtering
             parse_json_encoded_attr_values: Whether to parse JSON-encoded attribute values
             preferred_temporality: Optional dictionary mapping instrument types to aggregation temporality
@@ -148,7 +146,6 @@ class CloudWatchEMFExporter(MetricExporter):
         self.namespace = namespace
         self.log_group_name = log_group_name
         self.log_stream_name = log_stream_name or self._generate_log_stream_name()
-        self.dimension_rollup_option = dimension_rollup_option
         self.metric_declarations = metric_declarations or []
         self.parse_json_encoded_attr_values = parse_json_encoded_attr_values
         
@@ -576,8 +573,6 @@ class CloudWatchEMFExporter(MetricExporter):
                 Gauge, Sum, Histogram, ExponentialHistogram
             )
             
-            logger.info("Starting to export metrics data")
-            print("Starting to export metrics data")
             if not metrics_data.resource_metrics:
                 return MetricExportResult.SUCCESS
             
@@ -585,14 +580,12 @@ class CloudWatchEMFExporter(MetricExporter):
             for resource_metrics in metrics_data.resource_metrics:
                 # The resource is now part of each resource_metrics object
                 resource = resource_metrics.resource
-                print(f"Starting to export scope metrics data size: {len(resource_metrics.scope_metrics)}")
                 
                 for scope_metrics in resource_metrics.scope_metrics:
                     # Dictionary to group metrics by attributes and timestamp
                     # Key: (attributes_key, timestamp_ms)
                     # Value: list of metric records
                     grouped_metrics = defaultdict(list)
-                    print(f"Starting to export metrics data size: {len(scope_metrics.metrics)}")
                     
                     # Process all metrics in this scope
                     for metric in scope_metrics.metrics:
@@ -654,10 +647,173 @@ class CloudWatchEMFExporter(MetricExporter):
             logger.error(traceback.format_exc())
             return MetricExportResult.FAILURE
     
-    def _send_log_event(self, log_event: Dict):
-        """Send a log event to CloudWatch Logs."""
+    # Constants for CloudWatch Logs limits
+    CW_MAX_EVENT_PAYLOAD_BYTES = 256 * 1024  # 256KB
+    CW_MAX_REQUEST_EVENT_COUNT = 10000
+    CW_PER_EVENT_HEADER_BYTES = 26
+    BATCH_FLUSH_INTERVAL = 60 * 1000
+    CW_MAX_REQUEST_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1MB
+    CW_TRUNCATED_SUFFIX = "[Truncated...]"
+    CW_EVENT_TIMESTAMP_LIMIT_PAST = 14 * 24 * 60 * 60 * 1000  # 14 days in milliseconds
+    CW_EVENT_TIMESTAMP_LIMIT_FUTURE = 2 * 60 * 60 * 1000  # 2 hours in milliseconds
+
+    def _validate_log_event(self, log_event: Dict) -> bool:
+        """
+        Validate the log event according to CloudWatch Logs constraints.
+        Implements the same validation logic as the Go version.
+        
+        Args:
+            log_event: The log event to validate
+            
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        message = log_event.get("message", "")
+        timestamp = log_event.get("timestamp", 0)
+        
+        # Check message size
+        message_size = len(message) + self.CW_PER_EVENT_HEADER_BYTES
+        if message_size > self.CW_MAX_EVENT_PAYLOAD_BYTES:
+            logger.warning(
+                f"Log event size {message_size} exceeds maximum allowed size {self.CW_MAX_EVENT_PAYLOAD_BYTES}. Truncating."
+            )
+            max_message_size = self.CW_MAX_EVENT_PAYLOAD_BYTES - self.CW_PER_EVENT_HEADER_BYTES - len(self.CW_TRUNCATED_SUFFIX)
+            log_event["message"] = message[:max_message_size] + self.CW_TRUNCATED_SUFFIX
+        
+        # Check empty message
+        if not log_event.get("message"):
+            logger.error("Empty log event message")
+            return False
+        
+        # Check timestamp constraints
+        current_time = int(time.time() * 1000)  # Current time in milliseconds
+        event_time = timestamp
+        
+        # Calculate the time difference
+        time_diff = current_time - event_time
+        
+        # Check if too old or too far in the future
+        if time_diff > self.CW_EVENT_TIMESTAMP_LIMIT_PAST or time_diff < -self.CW_EVENT_TIMESTAMP_LIMIT_FUTURE:
+            logger.error(
+                f"Log event timestamp {event_time} is either older than 14 days or more than 2 hours in the future. "
+                f"Current time: {current_time}"
+            )
+            return False
+        
+        return True
+    
+    def _create_event_batch(self) -> Dict:
+        """
+        Create a new log event batch.
+        
+        Returns:
+            Dict: A new event batch
+        """
+        return {
+            "logEvents": [],
+            "byteTotal": 0,
+            "minTimestampMs": 0,
+            "maxTimestampMs": 0,
+            "createdTimestampMs": int(time.time() * 1000)
+        }
+    
+    def _event_batch_exceeds_limit(self, batch: Dict, next_event_size: int) -> bool:
+        """
+        Check if adding the next event would exceed CloudWatch Logs limits.
+        
+        Args:
+            batch: The current batch
+            next_event_size: Size of the next event in bytes self.CW_MAX_REQUEST_EVENT_COUNT
+            
+        Returns:
+            bool: True if adding the next event would exceed limits
+        """
+        return (
+            len(batch["logEvents"]) >= self.CW_MAX_REQUEST_EVENT_COUNT or
+            batch["byteTotal"] + next_event_size > self.CW_MAX_REQUEST_PAYLOAD_BYTES
+        )
+    
+    def _is_batch_active(self, batch: Dict, target_timestamp_ms: int) -> bool:
+        """
+        Check if the event batch spans more than 24 hours.
+        
+        Args:
+            batch: The event batch
+            target_timestamp_ms: The timestamp of the event to add
+            
+        Returns:
+            bool: True if the batch is active and can accept the event
+        """
+        # New log event batch
+        if batch["minTimestampMs"] == 0 or batch["maxTimestampMs"] == 0:
+            return True
+        
+        # Check if adding the event would make the batch span more than 24 hours
+        if target_timestamp_ms - batch["minTimestampMs"] > 24 * 3600 * 1000:
+            return False
+        
+        if batch["maxTimestampMs"] - target_timestamp_ms > 24 * 3600 * 1000:
+            return False
+        
+        # flush the event batch when reached 60s interval
+        current_time = int(time.time() * 1000)
+        if current_time - batch["createdTimestampMs"] >= self.BATCH_FLUSH_INTERVAL:
+            return False
+        
+        return True
+    
+    def _append_to_batch(self, batch: Dict, log_event: Dict, event_size: int) -> None:
+        """
+        Append a log event to the batch.
+        
+        Args:
+            batch: The event batch
+            log_event: The log event to append
+            event_size: Size of the event in bytes
+        """
+        batch["logEvents"].append(log_event)
+        batch["byteTotal"] += event_size
+        
+        timestamp = log_event["timestamp"]
+        if batch["minTimestampMs"] == 0 or batch["minTimestampMs"] > timestamp:
+            batch["minTimestampMs"] = timestamp
+        
+        if batch["maxTimestampMs"] == 0 or batch["maxTimestampMs"] < timestamp:
+            batch["maxTimestampMs"] = timestamp
+    
+    def _sort_log_events(self, batch: Dict) -> None:
+        """
+        Sort log events in the batch by timestamp.
+        
+        Args:
+            batch: The event batch
+        """
+        batch["logEvents"] = sorted(batch["logEvents"], key=lambda x: x["timestamp"])
+    
+    def _send_log_batch(self, batch: Dict) -> None:
+        """
+        Send a batch of log events to CloudWatch Logs.
+        
+        Args:
+            batch: The event batch
+        """
+        if not batch["logEvents"]:
+            return
+        
+        # Sort log events by timestamp
+        self._sort_log_events(batch)
+        
+        # Prepare the PutLogEvents request
+        put_log_events_input = {
+            "logGroupName": self.log_group_name,
+            "logStreamName": self.log_stream_name,
+            "logEvents": batch["logEvents"]
+        }
+        
+        start_time = time.time()
+        
         try:
-            # First check if log group exists and create it if needed
+            # Create log group and stream if they don't exist
             try:
                 self.logs_client.create_log_group(
                     logGroupName=self.log_group_name
@@ -667,7 +823,7 @@ class CloudWatchEMFExporter(MetricExporter):
                 # Log group already exists, this is fine
                 logger.debug(f"Log group {self.log_group_name} already exists")
             
-            # Then check if log stream exists and create it if needed
+            # Create log stream if it doesn't exist
             try:
                 self.logs_client.create_log_stream(
                     logGroupName=self.log_group_name,
@@ -678,16 +834,64 @@ class CloudWatchEMFExporter(MetricExporter):
                 # Log stream already exists, this is fine
                 logger.debug(f"Log stream {self.log_stream_name} already exists")
             
-            # Put log event
-            response = self.logs_client.put_log_events(
-                logGroupName=self.log_group_name,
-                logStreamName=self.log_stream_name,
-                logEvents=[log_event]
+            # Make the PutLogEvents call
+            response = self.logs_client.put_log_events(**put_log_events_input)
+            
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.debug(
+                f"Successfully sent {len(batch['logEvents'])} log events "
+                f"({batch['byteTotal'] / 1024:.2f} KB) in {elapsed_ms} ms"
             )
-            logger.debug(f"CloudWatch PutLogEvents response: {response}")
+            
+            return response
             
         except Exception as e:
-            logger.error(f"Failed to send log event: {e}")
+            logger.error(f"Failed to send log events: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+    
+    # Event batch to store logs before sending to CloudWatch
+    _event_batch = None
+    
+    def _send_log_event(self, log_event: Dict):
+        """
+        Send a log event to CloudWatch Logs.
+        
+        This function implements the same logic as the Go version in the OTel Collector.
+        It batches log events according to CloudWatch Logs constraints and sends them
+        when the batch is full or spans more than 24 hours.
+        
+        Args:
+            log_event: The log event to send
+        """
+        try:
+            # Validate the log event
+            if not self._validate_log_event(log_event):
+                return
+            
+            # Calculate event size
+            event_size = len(log_event["message"]) + self.CW_PER_EVENT_HEADER_BYTES
+            
+            # Initialize event batch if needed
+            if self._event_batch is None:
+                self._event_batch = self._create_event_batch()
+            
+            # Check if we need to send the current batch and create a new one
+            current_batch = self._event_batch
+            if (self._event_batch_exceeds_limit(current_batch, event_size) or 
+                not self._is_batch_active(current_batch, log_event["timestamp"])):
+                # Send the current batch
+                self._send_log_batch(current_batch)
+                # Create a new batch
+                self._event_batch = self._create_event_batch()
+                current_batch = self._event_batch
+            
+            # Add the log event to the batch
+            self._append_to_batch(current_batch, log_event, event_size)
+            
+        except Exception as e:
+            logger.error(f"Failed to process log event: {e}")
             import traceback
             logger.error(traceback.format_exc())
             raise
@@ -702,7 +906,11 @@ class CloudWatchEMFExporter(MetricExporter):
         Returns:
             True if successful, False otherwise
         """
-        # No buffering in this implementation, so always return True
+        if self._event_batch is not None and len(self._event_batch["logEvents"]) > 0:
+            current_batch = self._event_batch
+            self._send_log_batch(current_batch)
+            self._event_batch = self._create_event_batch()
+        logger.debug(f"CloudWatchEMFExporter force flushes the bufferred metrics")
         return True
     
     def shutdown(self, timeout_millis=None, **kwargs):
@@ -715,7 +923,8 @@ class CloudWatchEMFExporter(MetricExporter):
             **kwargs: Ignored additional keyword arguments
         """
         # Intentionally do nothing
-        logger.debug(f"CloudWatchEMFExporter shutdown called with timeout_millis={timeout_millis} - no action taken")
+        self.force_flush(timeout_millis)
+        logger.debug(f"CloudWatchEMFExporter shutdown called with timeout_millis={timeout_millis}")
         return True
 
 
@@ -766,91 +975,3 @@ def create_emf_exporter(
         preferred_temporality=temporality_dict,
         **kwargs
     )
-
-
-# Example usage
-if __name__ == "__main__":
-    import random
-    import time
-    from opentelemetry import metrics
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-    from opentelemetry.sdk.resources import Resource
-    
-    # Setup basic logging
-    logging.basicConfig(level=logging.DEBUG)
-
-    
-    # Create a resource
-    resource = Resource.create({
-        "service.name": "my-service",
-        "service.version": "0.1.0",
-        "deployment.environment": "production"
-    })
-    
-    # Create EMF exporter with the helper function
-    emf_exporter = create_emf_exporter(
-        namespace="MyApplication1",
-        log_group_name="/aws/otel/my-app",
-        aws_region="us-east-1",
-        debug=True
-    )
-
-    os.environ.setdefault("OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION", "base2_exponential_bucket_histogram")
-    
-    # Create metric reader
-    metric_reader = PeriodicExportingMetricReader(
-        exporter=emf_exporter,
-        export_interval_millis=5000  # Export every 5 seconds for testing
-    )
-    
-    # Create meter provider with resource
-    meter_provider = MeterProvider(
-        metric_readers=[metric_reader],
-        resource=resource
-    )
-    
-    # Set global meter provider
-    metrics.set_meter_provider(meter_provider)
-    
-    # Create a meter
-    meter = meter_provider.get_meter("my-app-meter")
-
-    
-    # Create some metrics
-    request_counter = meter.create_counter(
-        name="http_requests_total",
-        description="Total HTTP requests",
-        unit="1"
-    )
-    
-    request_duration = meter.create_histogram(
-        name="http_request_duration_seconds",
-        description="HTTP request duration",
-        unit="s"
-    )
-    
-    # Use the metrics in a loop to simulate traffic with different attribute sets
-    print("Generating metrics with different attribute sets. Press Ctrl+C to stop...")
-    try:
-        while True:
-            # Group 1: Method GET, Status 200
-            request_counter.add(1, {"method": "GET", "status": "200"})
-            request_duration.record(0.1 + (0.5 * random.random()), {"method": "GET", "status": "200"})
-            
-            # Group 2: Method POST, Status 201
-            request_counter.add(1, {"method": "POST", "status": "201"})
-            # request_duration.record(0.2 + (0.7 * random.random()), {"method": "POST", "status": "201"})
-            
-            # Group 3: Method GET, Status 500 (error case)
-            # if random.random() < 0.1:  # 10% error rate
-            #     request_counter.add(1, {"method": "GET", "status": "500"})
-            #     request_duration.record(1.0 + (1.0 * random.random()), {"method": "GET", "status": "500"})
-            
-            # Sleep between 100ms and 300ms
-            time.sleep(3)
-    except KeyboardInterrupt:
-        print("\nStopping metric generation.")
-        # Force flush metrics
-        print("Flushing metrics...")
-        metric_reader.force_flush()
