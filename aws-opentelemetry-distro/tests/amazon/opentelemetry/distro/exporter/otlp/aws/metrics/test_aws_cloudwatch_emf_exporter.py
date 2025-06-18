@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from botocore.exceptions import ClientError
 
 from amazon.opentelemetry.distro.exporter.otlp.aws.metrics.aws_cloudwatch_emf_exporter import AwsCloudWatchEMFExporter
-from opentelemetry.sdk.metrics.export import Gauge, MetricExportResult
+from opentelemetry.sdk.metrics.export import Gauge, Sum, Histogram, MetricExportResult
 from opentelemetry.sdk.resources import Resource
 
 
@@ -31,8 +31,63 @@ class MockMetric:
         self.description = description
 
 
+class MockHistogramDataPoint(MockDataPoint):
+    """Mock histogram datapoint for testing."""
+    def __init__(self, count=5, sum_val=25.0, min_val=1.0, max_val=10.0, **kwargs):
+        super().__init__(**kwargs)
+        self.count = count
+        self.sum = sum_val
+        self.min = min_val
+        self.max = max_val
+
+
+class MockExpHistogramDataPoint(MockDataPoint):
+    """Mock exponential histogram datapoint for testing."""
+    def __init__(self, count=10, sum_val=50.0, min_val=1.0, max_val=20.0, scale=2, **kwargs):
+        super().__init__(**kwargs)
+        self.count = count
+        self.sum = sum_val
+        self.min = min_val
+        self.max = max_val
+        self.scale = scale
+        
+        # Mock positive buckets
+        self.positive = Mock()
+        self.positive.offset = 0
+        self.positive.bucket_counts = [1, 2, 3, 4]
+        
+        # Mock negative buckets
+        self.negative = Mock()
+        self.negative.offset = 0
+        self.negative.bucket_counts = []
+        
+        # Mock zero count
+        self.zero_count = 0
+
+
 class MockGaugeData:
     """Mock gauge data that passes isinstance checks."""
+
+    def __init__(self, data_points=None):
+        self.data_points = data_points or []
+
+
+class MockSumData:
+    """Mock sum data that passes isinstance checks."""
+
+    def __init__(self, data_points=None):
+        self.data_points = data_points or []
+
+
+class MockHistogramData:
+    """Mock histogram data that passes isinstance checks."""
+
+    def __init__(self, data_points=None):
+        self.data_points = data_points or []
+
+
+class MockExpHistogramData:
+    """Mock exponential histogram data that passes isinstance checks."""
 
     def __init__(self, data_points=None):
         self.data_points = data_points or []
@@ -538,6 +593,306 @@ class TestAwsCloudWatchEMFExporter(unittest.TestCase):
         # Should still return success
         result = self.exporter.export(metrics_data)
         self.assertEqual(result, MetricExportResult.SUCCESS)
+
+    def test_convert_sum(self):
+        """Test sum conversion."""
+        metric = MockMetric("sum_metric", "Count", "Sum description")
+        dp = MockDataPoint(value=100.0, attributes={"env": "test"})
+        
+        record, timestamp = self.exporter._convert_sum(metric, dp)
+        
+        self.assertIsNotNone(record)
+        self.assertEqual(record.instrument.name, "sum_metric")
+        self.assertTrue(hasattr(record, 'sum_data'))
+        self.assertEqual(record.sum_data.value, 100.0)
+        self.assertEqual(record.attributes, {"env": "test"})
+        self.assertIsInstance(timestamp, int)
+
+    def test_convert_histogram(self):
+        """Test histogram conversion."""
+        metric = MockMetric("histogram_metric", "ms", "Histogram description")
+        dp = MockHistogramDataPoint(
+            count=10,
+            sum_val=150.0,
+            min_val=5.0,
+            max_val=25.0,
+            attributes={"region": "us-east-1"}
+        )
+        
+        record, timestamp = self.exporter._convert_histogram(metric, dp)
+        
+        self.assertIsNotNone(record)
+        self.assertEqual(record.instrument.name, "histogram_metric")
+        self.assertTrue(hasattr(record, 'histogram_data'))
+        
+        expected_value = {
+            "Count": 10,
+            "Sum": 150.0,
+            "Min": 5.0,
+            "Max": 25.0
+        }
+        self.assertEqual(record.histogram_data.value, expected_value)
+        self.assertEqual(record.attributes, {"region": "us-east-1"})
+        self.assertIsInstance(timestamp, int)
+
+    def test_convert_exp_histogram(self):
+        """Test exponential histogram conversion."""
+        metric = MockMetric("exp_histogram_metric", "s", "Exponential histogram description")
+        dp = MockExpHistogramDataPoint(
+            count=8,
+            sum_val=64.0,
+            min_val=2.0,
+            max_val=32.0,
+            attributes={"service": "api"}
+        )
+        
+        record, timestamp = self.exporter._convert_exp_histogram(metric, dp)
+        
+        self.assertIsNotNone(record)
+        self.assertEqual(record.instrument.name, "exp_histogram_metric")
+        self.assertTrue(hasattr(record, 'exp_histogram_data'))
+        
+        exp_data = record.exp_histogram_data.value
+        self.assertIn("Values", exp_data)
+        self.assertIn("Counts", exp_data)
+        self.assertEqual(exp_data["Count"], 8)
+        self.assertEqual(exp_data["Sum"], 64.0)
+        self.assertEqual(exp_data["Min"], 2.0)
+        self.assertEqual(exp_data["Max"], 32.0)
+        self.assertEqual(record.attributes, {"service": "api"})
+        self.assertIsInstance(timestamp, int)
+
+    def test_export_with_sum_metrics(self):
+        """Test export with Sum metrics."""
+        # Create mock metrics data with Sum type
+        resource = Resource.create({"service.name": "test-service"})
+        
+        sum_data = MockSumData([MockDataPoint(value=25.0, attributes={"env": "test"})])
+        # Create a mock that will pass the type() check for Sum
+        sum_data.__class__ = Sum
+        metric = MockMetricWithData(name="test_sum", data=sum_data)
+        
+        scope_metrics = MockScopeMetrics(metrics=[metric])
+        resource_metrics = MockResourceMetrics(resource=resource, scope_metrics=[scope_metrics])
+        
+        metrics_data = Mock()
+        metrics_data.resource_metrics = [resource_metrics]
+        
+        result = self.exporter.export(metrics_data)
+        self.assertEqual(result, MetricExportResult.SUCCESS)
+
+    def test_export_with_histogram_metrics(self):
+        """Test export with Histogram metrics."""
+        # Create mock metrics data with Histogram type
+        resource = Resource.create({"service.name": "test-service"})
+        
+        hist_dp = MockHistogramDataPoint(count=5, sum_val=25.0, min_val=1.0, max_val=10.0, attributes={"env": "test"})
+        hist_data = MockHistogramData([hist_dp])
+        # Create a mock that will pass the type() check for Histogram
+        hist_data.__class__ = Histogram
+        metric = MockMetricWithData(name="test_histogram", data=hist_data)
+        
+        scope_metrics = MockScopeMetrics(metrics=[metric])
+        resource_metrics = MockResourceMetrics(resource=resource, scope_metrics=[scope_metrics])
+        
+        metrics_data = Mock()
+        metrics_data.resource_metrics = [resource_metrics]
+        
+        result = self.exporter.export(metrics_data)
+        self.assertEqual(result, MetricExportResult.SUCCESS)
+
+
+class TestBatchProcessing(unittest.TestCase):
+    """Test batch processing functionality."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        # Mock the botocore session to avoid AWS calls
+        with patch("botocore.session.Session") as mock_session:
+            mock_client = Mock()
+            mock_session_instance = Mock()
+            mock_session.return_value = mock_session_instance
+            mock_session_instance.create_client.return_value = mock_client
+            mock_client.create_log_group.return_value = {}
+            mock_client.create_log_stream.return_value = {}
+            
+            self.exporter = AwsCloudWatchEMFExporter(
+                namespace="TestNamespace",
+                log_group_name="test-log-group"
+            )
+    
+    def test_create_event_batch(self):
+        """Test event batch creation."""
+        batch = self.exporter._create_event_batch()
+        
+        self.assertEqual(batch["logEvents"], [])
+        self.assertEqual(batch["byteTotal"], 0)
+        self.assertEqual(batch["minTimestampMs"], 0)
+        self.assertEqual(batch["maxTimestampMs"], 0)
+        self.assertIsInstance(batch["createdTimestampMs"], int)
+    
+    def test_validate_log_event_valid(self):
+        """Test log event validation with valid event."""
+        log_event = {
+            "message": "test message",
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        result = self.exporter._validate_log_event(log_event)
+        self.assertTrue(result)
+    
+    def test_validate_log_event_empty_message(self):
+        """Test log event validation with empty message."""
+        log_event = {
+            "message": "",
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        result = self.exporter._validate_log_event(log_event)
+        self.assertFalse(result)
+    
+    def test_validate_log_event_oversized_message(self):
+        """Test log event validation with oversized message."""
+        # Create a message larger than the maximum allowed size
+        large_message = "x" * (self.exporter.CW_MAX_EVENT_PAYLOAD_BYTES + 100)
+        log_event = {
+            "message": large_message,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        result = self.exporter._validate_log_event(log_event)
+        self.assertTrue(result)  # Should still be valid after truncation
+        # Check that message was truncated
+        self.assertLess(len(log_event["message"]), len(large_message))
+        self.assertTrue(log_event["message"].endswith(self.exporter.CW_TRUNCATED_SUFFIX))
+    
+    def test_validate_log_event_old_timestamp(self):
+        """Test log event validation with very old timestamp."""
+        # Timestamp from 15 days ago
+        old_timestamp = int(time.time() * 1000) - (15 * 24 * 60 * 60 * 1000)
+        log_event = {
+            "message": "test message",
+            "timestamp": old_timestamp
+        }
+        
+        result = self.exporter._validate_log_event(log_event)
+        self.assertFalse(result)
+    
+    def test_validate_log_event_future_timestamp(self):
+        """Test log event validation with future timestamp."""
+        # Timestamp 3 hours in the future
+        future_timestamp = int(time.time() * 1000) + (3 * 60 * 60 * 1000)
+        log_event = {
+            "message": "test message",
+            "timestamp": future_timestamp
+        }
+        
+        result = self.exporter._validate_log_event(log_event)
+        self.assertFalse(result)
+    
+    def test_event_batch_exceeds_limit_by_count(self):
+        """Test batch limit checking by event count."""
+        batch = self.exporter._create_event_batch()
+        # Simulate batch with maximum events
+        batch["logEvents"] = [{"message": "test"}] * self.exporter.CW_MAX_REQUEST_EVENT_COUNT
+        
+        result = self.exporter._event_batch_exceeds_limit(batch, 100)
+        self.assertTrue(result)
+    
+    def test_event_batch_exceeds_limit_by_size(self):
+        """Test batch limit checking by byte size."""
+        batch = self.exporter._create_event_batch()
+        batch["byteTotal"] = self.exporter.CW_MAX_REQUEST_PAYLOAD_BYTES - 50
+        
+        result = self.exporter._event_batch_exceeds_limit(batch, 100)
+        self.assertTrue(result)
+    
+    def test_event_batch_within_limits(self):
+        """Test batch limit checking within limits."""
+        batch = self.exporter._create_event_batch()
+        batch["logEvents"] = [{"message": "test"}] * 10
+        batch["byteTotal"] = 1000
+        
+        result = self.exporter._event_batch_exceeds_limit(batch, 100)
+        self.assertFalse(result)
+    
+    def test_is_batch_active_new_batch(self):
+        """Test batch activity check for new batch."""
+        batch = self.exporter._create_event_batch()
+        current_time = int(time.time() * 1000)
+        
+        result = self.exporter._is_batch_active(batch, current_time)
+        self.assertTrue(result)
+    
+    def test_is_batch_active_24_hour_span(self):
+        """Test batch activity check for 24+ hour span."""
+        batch = self.exporter._create_event_batch()
+        current_time = int(time.time() * 1000)
+        batch["minTimestampMs"] = current_time
+        batch["maxTimestampMs"] = current_time
+        
+        # Test with timestamp 25 hours in the future
+        future_timestamp = current_time + (25 * 60 * 60 * 1000)
+        
+        result = self.exporter._is_batch_active(batch, future_timestamp)
+        self.assertFalse(result)
+    
+    def test_append_to_batch(self):
+        """Test appending log event to batch."""
+        batch = self.exporter._create_event_batch()
+        log_event = {
+            "message": "test message",
+            "timestamp": int(time.time() * 1000)
+        }
+        event_size = 100
+        
+        self.exporter._append_to_batch(batch, log_event, event_size)
+        
+        self.assertEqual(len(batch["logEvents"]), 1)
+        self.assertEqual(batch["byteTotal"], event_size)
+        self.assertEqual(batch["minTimestampMs"], log_event["timestamp"])
+        self.assertEqual(batch["maxTimestampMs"], log_event["timestamp"])
+    
+    def test_sort_log_events(self):
+        """Test sorting log events by timestamp."""
+        batch = self.exporter._create_event_batch()
+        current_time = int(time.time() * 1000)
+        
+        # Add events with timestamps in reverse order
+        events = [
+            {"message": "third", "timestamp": current_time + 2000},
+            {"message": "first", "timestamp": current_time},
+            {"message": "second", "timestamp": current_time + 1000}
+        ]
+        
+        batch["logEvents"] = events.copy()
+        self.exporter._sort_log_events(batch)
+        
+        # Check that events are now sorted by timestamp
+        self.assertEqual(batch["logEvents"][0]["message"], "first")
+        self.assertEqual(batch["logEvents"][1]["message"], "second")
+        self.assertEqual(batch["logEvents"][2]["message"], "third")
+    
+    @patch.object(AwsCloudWatchEMFExporter, '_send_log_batch')
+    def test_force_flush_with_pending_events(self, mock_send_batch):
+        """Test force flush functionality with pending events."""
+        # Create a batch with events
+        self.exporter._event_batch = self.exporter._create_event_batch()
+        self.exporter._event_batch["logEvents"] = [{"message": "test", "timestamp": int(time.time() * 1000)}]
+        
+        result = self.exporter.force_flush()
+        
+        self.assertTrue(result)
+        mock_send_batch.assert_called_once()
+    
+    def test_force_flush_no_pending_events(self):
+        """Test force flush functionality with no pending events."""
+        # No batch exists
+        self.assertIsNone(self.exporter._event_batch)
+        
+        result = self.exporter.force_flush()
+        
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":
