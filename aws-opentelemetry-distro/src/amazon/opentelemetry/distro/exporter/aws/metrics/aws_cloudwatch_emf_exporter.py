@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 
 from opentelemetry.sdk.metrics import (
     Counter,
+    Histogram as HistogramInstr,
     ObservableCounter,
     ObservableGauge,
     ObservableUpDownCounter,
@@ -32,6 +33,7 @@ from opentelemetry.sdk.metrics.export import (
     MetricsData,
     NumberDataPoint,
 )
+from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.util.types import Attributes
 
@@ -129,6 +131,7 @@ class AwsCloudWatchEmfExporter(MetricExporter):
         log_stream_name: Optional[str] = None,
         aws_region: Optional[str] = None,
         preferred_temporality: Optional[Dict[type, AggregationTemporality]] = None,
+        preferred_aggregation: Optional[Dict[type, Any]] = None,
         **kwargs,
     ):
         """
@@ -140,20 +143,27 @@ class AwsCloudWatchEmfExporter(MetricExporter):
             log_stream_name: CloudWatch log stream name (auto-generated if None)
             aws_region: AWS region (auto-detected if None)
             preferred_temporality: Optional dictionary mapping instrument types to aggregation temporality
+            preferred_aggregation: Optional dictionary mapping instrument types to preferred aggregation
             **kwargs: Additional arguments passed to botocore client
         """
         # Set up temporality preference default to DELTA if customers not set
         if preferred_temporality is None:
             preferred_temporality = {
                 Counter: AggregationTemporality.DELTA,
-                Histogram: AggregationTemporality.DELTA,
+                HistogramInstr: AggregationTemporality.DELTA,
                 ObservableCounter: AggregationTemporality.DELTA,
                 ObservableGauge: AggregationTemporality.DELTA,
                 ObservableUpDownCounter: AggregationTemporality.DELTA,
                 UpDownCounter: AggregationTemporality.DELTA,
             }
 
-        super().__init__(preferred_temporality)
+        # Set up aggregation preference default to exponential histogram for histogram metrics
+        if preferred_aggregation is None:
+            preferred_aggregation = {
+                HistogramInstr: ExponentialBucketHistogramAggregation(),
+            }
+
+        super().__init__(preferred_temporality, preferred_aggregation)
 
         self.namespace = namespace
         self.log_group_name = log_group_name
@@ -291,30 +301,18 @@ class AwsCloudWatchEmfExporter(MetricExporter):
         record = self._create_metric_record(metric.name, metric.unit, metric.description)
 
         # Set timestamp
-        try:
-            timestamp_ms = (
-                self._normalize_timestamp(data_point.time_unix_nano)
-                if data_point.time_unix_nano is not None
-                else int(time.time() * 1000)
-            )
-        except AttributeError:
-            # data_point doesn't have time_unix_nano attribute
-            timestamp_ms = int(time.time() * 1000)
+        timestamp_ms = (
+            self._normalize_timestamp(data_point.time_unix_nano)
+            if data_point.time_unix_nano is not None
+            else int(time.time() * 1000)
+        )
         record.timestamp = timestamp_ms
 
         # Set attributes
-        try:
-            record.attributes = data_point.attributes
-        except AttributeError:
-            # data_point doesn't have attributes
-            record.attributes = {}
+        record.attributes = data_point.attributes
 
         # For Gauge, set the value directly
-        try:
-            record.value = data_point.value
-        except AttributeError:
-            # data_point doesn't have value
-            record.value = None
+        record.value = data_point.value
 
         return record
 
@@ -333,7 +331,9 @@ class AwsCloudWatchEmfExporter(MetricExporter):
 
         # Set timestamp
         timestamp_ms = (
-            self._normalize_timestamp(data_point.time_unix_nano) if hasattr(data_point, "time_unix_nano") else int(time.time() * 1000)
+            self._normalize_timestamp(data_point.time_unix_nano)
+            if data_point.time_unix_nano is not None
+            else int(time.time() * 1000)
         )
         record.timestamp = timestamp_ms
 
@@ -363,7 +363,9 @@ class AwsCloudWatchEmfExporter(MetricExporter):
 
         # Set timestamp
         timestamp_ms = (
-            self._normalize_timestamp(data_point.time_unix_nano) if hasattr(data_point, "time_unix_nano") else int(time.time() * 1000)
+            self._normalize_timestamp(data_point.time_unix_nano)
+            if data_point.time_unix_nano is not None
+            else int(time.time() * 1000)
         )
         record.timestamp = timestamp_ms
 
@@ -404,7 +406,9 @@ class AwsCloudWatchEmfExporter(MetricExporter):
 
         # Set timestamp
         timestamp_ms = (
-            self._normalize_timestamp(data_point.time_unix_nano) if hasattr(data_point, "time_unix_nano") else int(time.time() * 1000)
+            self._normalize_timestamp(data_point.time_unix_nano)
+            if data_point.time_unix_nano is not None
+            else int(time.time() * 1000)
         )
         record.timestamp = timestamp_ms
 
@@ -421,7 +425,7 @@ class AwsCloudWatchEmfExporter(MetricExporter):
         base = math.pow(2, math.pow(2, float(-scale)))
 
         # Process positive buckets
-        if hasattr(data_point, "positive") and hasattr(data_point.positive, "bucket_counts") and data_point.positive.bucket_counts:
+        if data_point.positive and data_point.positive.bucket_counts:
             positive_offset = getattr(data_point.positive, "offset", 0)
             positive_bucket_counts = data_point.positive.bucket_counts
 
@@ -453,7 +457,7 @@ class AwsCloudWatchEmfExporter(MetricExporter):
             array_counts.append(float(zero_count))
 
         # Process negative buckets
-        if hasattr(data_point, "negative") and hasattr(data_point.negative, "bucket_counts") and data_point.negative.bucket_counts:
+        if data_point.negative and data_point.negative.bucket_counts:
             negative_offset = getattr(data_point.negative, "offset", 0)
             negative_bucket_counts = data_point.negative.bucket_counts
 
@@ -739,17 +743,17 @@ class AwsCloudWatchEmfExporter(MetricExporter):
                 metric_data["Unit"] = unit
 
             # Process different types of aggregations
-            if hasattr(record, 'exp_histogram_data') and record.exp_histogram_data:
+            if record.exp_histogram_data:
                 # Base2 Exponential Histogram
                 exp_histogram = record.exp_histogram_data
                 # Store value directly in emf_log
                 emf_log[metric_name] = exp_histogram.value
-            elif hasattr(record, 'histogram_data') and record.histogram_data:
+            elif record.histogram_data:
                 # Regular Histogram metrics
                 histogram_data = record.histogram_data
                 # Store value directly in emf_log
                 emf_log[metric_name] = histogram_data.value
-            elif hasattr(record, 'sum_data') and record.sum_data:
+            elif record.sum_data:
                 # Counter/UpDownCounter
                 sum_data = record.sum_data
                 # Store value directly in emf_log

@@ -1,11 +1,18 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
+from amazon.opentelemetry.distro._utils import is_agent_observability_enabled
 from amazon.opentelemetry.distro.exporter.otlp.aws.common.aws_auth_session import AwsAuthSession
+from amazon.opentelemetry.distro.llo_handler import LLOHandler
 from opentelemetry.exporter.otlp.proto.http import Compression
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExportResult
+
+AGENT_OBSERVABILITY_ENABLED = "AGENT_OBSERVABILITY_ENABLED"
 
 
 class OTLPAwsSpanExporter(OTLPSpanExporter):
@@ -18,8 +25,11 @@ class OTLPAwsSpanExporter(OTLPSpanExporter):
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
         compression: Optional[Compression] = None,
+        logger_provider: Optional[LoggerProvider] = None,
     ):
         self._aws_region = None
+        self._llo_handler = None
+        self._logger_provider = logger_provider
 
         if endpoint:
             self._aws_region = endpoint.split(".")[1]
@@ -35,3 +45,32 @@ class OTLPAwsSpanExporter(OTLPSpanExporter):
             compression,
             session=AwsAuthSession(aws_region=self._aws_region, service="xray"),
         )
+
+    def _ensure_llo_handler(self):
+        """Lazily initialize LLO handler when needed to avoid initialization order issues"""
+        if self._llo_handler is None and is_agent_observability_enabled():
+            # If logger_provider wasn't provided, try to get the current one
+            if self._logger_provider is None:
+                from opentelemetry._logs import get_logger_provider
+
+                try:
+                    self._logger_provider = get_logger_provider()
+                except Exception:
+                    # If logger provider can't be found, we can't process LLO
+                    return False
+
+            if self._logger_provider:
+                self._llo_handler = LLOHandler(self._logger_provider)
+                return True
+
+        return self._llo_handler is not None
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        try:
+            if is_agent_observability_enabled() and self._ensure_llo_handler():
+                llo_processed_spans = self._llo_handler.process_spans(spans)
+                return super().export(llo_processed_spans)
+        except Exception:
+            return SpanExportResult.FAILURE
+
+        return super().export(spans)
