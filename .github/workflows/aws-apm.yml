@@ -1,0 +1,48 @@
+name: AWS APM Analysis Test
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  awsapm-analysis:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@awsapm')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@awsapm')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@awsapm')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@awsapm') || contains(github.event.issue.title, '@awsapm')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run AWS APM Analysis
+        id: awsapm
+        uses: mxiamxia/aws-apm-action@main
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          trigger_phrase: "@awsapm"
+          use_sticky_comment: "true"
+          prompt: |
+            You are an AWS APM (Application Performance Monitoring) expert assistant.
+            Please analyze this repository and provide insights on:
+            1. Performance monitoring opportunities
+            2. APM best practices recommendations
+            3. AWS services that could improve observability
+            4. Specific code patterns that may impact performance
+            5. Cost optimization through better monitoring
