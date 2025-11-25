@@ -16,7 +16,10 @@ from amazon.utils.application_signals_constants import (
     AWS_LOCAL_OPERATION,
     AWS_LOCAL_SERVICE,
     AWS_REMOTE_OPERATION,
+    AWS_REMOTE_RESOURCE_ACCESS_KEY,
+    AWS_REMOTE_RESOURCE_ACCOUNT_ID,
     AWS_REMOTE_RESOURCE_IDENTIFIER,
+    AWS_REMOTE_RESOURCE_REGION,
     AWS_REMOTE_RESOURCE_TYPE,
     AWS_REMOTE_SERVICE,
     AWS_SPAN_KIND,
@@ -36,6 +39,11 @@ _AWS_BEDROCK_AGENT_ID: str = "aws.bedrock.agent.id"
 _AWS_BEDROCK_GUARDRAIL_ID: str = "aws.bedrock.guardrail.id"
 _AWS_BEDROCK_KNOWLEDGE_BASE_ID: str = "aws.bedrock.knowledge_base.id"
 _AWS_BEDROCK_DATA_SOURCE_ID: str = "aws.bedrock.data_source.id"
+_AWS_BEDROCK_AGENTCORE_RUNTIME_ARN: str = "aws.bedrock.agentcore.runtime.arn"
+_AWS_BEDROCK_AGENTCORE_RUNTIME_ENDPOINT_ARN: str = "aws.bedrock.agentcore.runtime_endpoint.arn"
+_AWS_BEDROCK_AGENTCORE_MEMORY_ARN: str = "aws.bedrock.agentcore.memory.arn"
+_AWS_BEDROCK_AGENTCORE_GATEWAY_ARN: str = "aws.bedrock.agentcore.gateway.arn"
+_AWS_BEDROCK_AGENTCORE_WORKLOAD_IDENTITY_ARN: str = "aws.bedrock.agentcore.identity.workload_identity.arn"
 
 _GEN_AI_REQUEST_MODEL: str = "gen_ai.request.model"
 _GEN_AI_REQUEST_TEMPERATURE: str = "gen_ai.request.temperature"
@@ -45,11 +53,20 @@ _GEN_AI_RESPONSE_FINISH_REASONS: str = "gen_ai.response.finish_reasons"
 _GEN_AI_USAGE_INPUT_TOKENS: str = "gen_ai.usage.input_tokens"
 _GEN_AI_USAGE_OUTPUT_TOKENS: str = "gen_ai.usage.output_tokens"
 _GEN_AI_SYSTEM: str = "gen_ai.system"
+_GEN_AI_RUNTIME_ID: str = "gen_ai.runtime.id"
+_GEN_AI_BROWSER_ID: str = "gen_ai.browser.id"
+_GEN_AI_CODE_INTERPRETER_ID: str = "gen_ai.code_interpreter.id"
+_GEN_AI_MEMORY_ID: str = "gen_ai.memory.id"
+_GEN_AI_GATEWAY_ID: str = "gen_ai.gateway.id"
 
+_AWS_GATEWAY_TARGET_ID: str = "aws.gateway.target.id"
+_AWS_AUTH_CREDENTIAL_PROVIDER: str = "aws.auth.credential_provider"
 _AWS_SECRET_ARN: str = "aws.secretsmanager.secret.arn"
 _AWS_STATE_MACHINE_ARN: str = "aws.stepfunctions.state_machine.arn"
 _AWS_ACTIVITY_ARN: str = "aws.stepfunctions.activity.arn"
 _AWS_SNS_TOPIC_ARN: str = "aws.sns.topic.arn"
+_AWS_DYNAMODB_TABLE_ARN: str = "aws.dynamodb.table.arn"
+_AWS_KINESIS_STREAM_ARN: str = "aws.kinesis.stream.arn"
 
 
 # pylint: disable=too-many-public-methods,too-many-lines
@@ -210,6 +227,29 @@ class BotocoreTest(ContractTestBase):
                 SpanAttributes.AWS_DYNAMODB_TABLE_NAMES: ["test_table"],
             },
             span_name="DynamoDB.CreateTable",
+        )
+
+    def test_dynamodb_describe_table(self):
+        self.do_test_requests(
+            "ddb/describetable/some-table",
+            "GET",
+            200,
+            0,
+            0,
+            remote_service="AWS::DynamoDB",
+            remote_operation="DescribeTable",
+            remote_resource_type="AWS::DynamoDB::Table",
+            remote_resource_identifier="put_test_table",
+            remote_resource_account_id="000000000000",
+            remote_resource_region="us-west-2",
+            cloudformation_primary_identifier="put_test_table",
+            request_specific_attributes={
+                SpanAttributes.AWS_DYNAMODB_TABLE_NAMES: ["put_test_table"],
+            },
+            response_specific_attributes={
+                _AWS_DYNAMODB_TABLE_ARN: r"arn:aws:dynamodb:us-west-2:000000000000:table/put_test_table",
+            },
+            span_name="DynamoDB.DescribeTable",
         )
 
     def test_dynamodb_put_item(self):
@@ -379,6 +419,26 @@ class BotocoreTest(ContractTestBase):
             span_name="Kinesis.PutRecord",
         )
 
+    def test_kinesis_describe_stream(self):
+        self.do_test_requests(
+            "kinesis/describestream/my-stream",
+            "GET",
+            200,
+            0,
+            0,
+            remote_service="AWS::Kinesis",
+            remote_operation="DescribeStream",
+            remote_resource_type="AWS::Kinesis::Stream",
+            remote_resource_identifier="test_stream",
+            cloudformation_primary_identifier="test_stream",
+            remote_resource_account_id="000000000000",
+            remote_resource_region="us-west-2",
+            request_specific_attributes={
+                _AWS_KINESIS_STREAM_NAME: "test_stream",
+            },
+            span_name="Kinesis.DescribeStream",
+        )
+
     def test_kinesis_error(self):
         self.do_test_requests(
             "kinesis/error",
@@ -440,7 +500,7 @@ class BotocoreTest(ContractTestBase):
                 _GEN_AI_USAGE_INPUT_TOKENS: 15,
                 _GEN_AI_USAGE_OUTPUT_TOKENS: 13,
             },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="text_completion amazon.titan-text-premier-v1:0",
         )
 
     def test_bedrock_runtime_invoke_model_amazon_nova(self):
@@ -458,6 +518,7 @@ class BotocoreTest(ContractTestBase):
             cloudformation_primary_identifier="amazon.nova-pro-v1:0",
             request_specific_attributes={
                 _GEN_AI_REQUEST_MODEL: "amazon.nova-pro-v1:0",
+                _GEN_AI_SYSTEM: "aws.bedrock",
                 _GEN_AI_REQUEST_MAX_TOKENS: 800,
                 _GEN_AI_REQUEST_TEMPERATURE: 0.9,
                 _GEN_AI_REQUEST_TOP_P: 0.7,
@@ -467,7 +528,7 @@ class BotocoreTest(ContractTestBase):
                 _GEN_AI_USAGE_INPUT_TOKENS: 432,
                 _GEN_AI_USAGE_OUTPUT_TOKENS: 681,
             },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="chat amazon.nova-pro-v1:0",
         )
 
     def test_bedrock_runtime_invoke_model_anthropic_claude(self):
@@ -495,7 +556,7 @@ class BotocoreTest(ContractTestBase):
                 _GEN_AI_USAGE_INPUT_TOKENS: 15,
                 _GEN_AI_USAGE_OUTPUT_TOKENS: 13,
             },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="chat anthropic.claude-v2:1",
         )
 
     def test_bedrock_runtime_invoke_model_meta_llama(self):
@@ -523,7 +584,7 @@ class BotocoreTest(ContractTestBase):
                 _GEN_AI_USAGE_INPUT_TOKENS: 31,
                 _GEN_AI_USAGE_OUTPUT_TOKENS: 49,
             },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="chat meta.llama2-13b-chat-v1",
         )
 
     def test_bedrock_runtime_invoke_model_cohere_command(self):
@@ -553,35 +614,7 @@ class BotocoreTest(ContractTestBase):
                 ),
                 _GEN_AI_USAGE_OUTPUT_TOKENS: math.ceil(len("test-generation-text") / 6),
             },
-            span_name="Bedrock Runtime.InvokeModel",
-        )
-
-    def test_bedrock_runtime_invoke_model_ai21_jamba(self):
-        self.do_test_requests(
-            "bedrock/invokemodel/invoke-model/ai21.jamba-1-5-large-v1:0",
-            "GET",
-            200,
-            0,
-            0,
-            rpc_service="Bedrock Runtime",
-            remote_service="AWS::BedrockRuntime",
-            remote_operation="InvokeModel",
-            remote_resource_type="AWS::Bedrock::Model",
-            remote_resource_identifier="ai21.jamba-1-5-large-v1:0",
-            cloudformation_primary_identifier="ai21.jamba-1-5-large-v1:0",
-            request_specific_attributes={
-                _GEN_AI_REQUEST_MODEL: "ai21.jamba-1-5-large-v1:0",
-                _GEN_AI_SYSTEM: "aws.bedrock",
-                _GEN_AI_REQUEST_MAX_TOKENS: 512,
-                _GEN_AI_REQUEST_TEMPERATURE: 0.6,
-                _GEN_AI_REQUEST_TOP_P: 0.8,
-            },
-            response_specific_attributes={
-                _GEN_AI_RESPONSE_FINISH_REASONS: ["stop"],
-                _GEN_AI_USAGE_INPUT_TOKENS: 21,
-                _GEN_AI_USAGE_OUTPUT_TOKENS: 24,
-            },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="chat cohere.command-r-v1:0",
         )
 
     def test_bedrock_runtime_invoke_model_mistral(self):
@@ -611,7 +644,7 @@ class BotocoreTest(ContractTestBase):
                 ),
                 _GEN_AI_USAGE_OUTPUT_TOKENS: math.ceil(len("test-output-text") / 6),
             },
-            span_name="Bedrock Runtime.InvokeModel",
+            span_name="chat mistral.mistral-7b-instruct-v0:2",
         )
 
     def test_bedrock_get_guardrail(self):
@@ -727,6 +760,361 @@ class BotocoreTest(ContractTestBase):
                 _AWS_BEDROCK_KNOWLEDGE_BASE_ID: "TESTKBSEID",
             },
             span_name="Bedrock Agent.GetDataSource",
+        )
+
+    def test_bedrock_agentcore_create_agent_runtime(self):
+        expected_identifier = "myAgent-w8slyU6q5M"
+        self.do_test_requests(
+            "bedrock-agentcore/runtime/createagentruntime/myAgent-w8slyU6q5M",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateAgentRuntime",
+            remote_resource_type="AWS::BedrockAgentCore::Runtime",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            response_specific_attributes={
+                _GEN_AI_RUNTIME_ID: expected_identifier,
+                _AWS_BEDROCK_AGENTCORE_RUNTIME_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/{expected_identifier}"
+                ),
+                _AWS_BEDROCK_AGENTCORE_WORKLOAD_IDENTITY_ARN: (
+                    "arn:aws:iam::123456789012:role/service-role/" "AmazonBedrockAgentCoreRuntimeDefaultServiceRole"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateAgentRuntime",
+        )
+
+    def test_bedrock_agentcore_create_agent_runtime_endpoint(self):
+        agent_id = "myAgent-w8slyU6q5M"
+        self.do_test_requests(
+            "bedrock-agentcore/runtime/createendpoint/myAgent-w8slyU6q5M",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateAgentRuntimeEndpoint",
+            remote_resource_type="AWS::BedrockAgentCore::RuntimeEndpoint",
+            remote_resource_identifier="invokeEndpoint",
+            cloudformation_primary_identifier=(
+                "arn:aws:bedrock-agentcore:us-west-2:123456789012:endpoint/invokeEndpoint"
+            ),
+            request_specific_attributes={
+                _GEN_AI_RUNTIME_ID: agent_id,
+            },
+            response_specific_attributes={
+                _GEN_AI_RUNTIME_ID: agent_id,
+                _AWS_BEDROCK_AGENTCORE_RUNTIME_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/{agent_id}"
+                ),
+                _AWS_BEDROCK_AGENTCORE_RUNTIME_ENDPOINT_ARN: (
+                    "arn:aws:bedrock-agentcore:us-west-2:123456789012:endpoint/invokeEndpoint"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateAgentRuntimeEndpoint",
+        )
+
+    def test_bedrock_agentcore_invoke_agent_runtime(self):
+        expected_identifier = "myAgent-w8slyU6q5M"
+        self.do_test_requests(
+            "bedrock-agentcore/runtime/invokeagentruntime/myAgent-w8slyU6q5M",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="InvokeAgentRuntime",
+            remote_resource_type="AWS::BedrockAgentCore::Runtime",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _AWS_BEDROCK_AGENTCORE_RUNTIME_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/{expected_identifier}"
+                ),
+            },
+            span_name="Bedrock AgentCore.InvokeAgentRuntime",
+        )
+
+    def test_bedrock_agentcore_start_browser_session(self):
+        expected_identifier = "agentBrowser-qYkrpgjS2M"
+        self.do_test_requests(
+            "bedrock-agentcore/browser/startbrowsersession/agentBrowser-qYkrpgjS2M",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="StartBrowserSession",
+            remote_resource_type="AWS::BedrockAgentCore::BrowserCustom",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _GEN_AI_BROWSER_ID: expected_identifier,
+            },
+            response_specific_attributes={
+                _GEN_AI_BROWSER_ID: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.StartBrowserSession",
+        )
+
+    def test_bedrock_agentcore_start_browser_session_v1(self):
+        expected_identifier = "aws.browser.v1"
+        self.do_test_requests(
+            "bedrock-agentcore/browser/startbrowsersession/aws.browser.v1",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="StartBrowserSession",
+            remote_resource_type="AWS::BedrockAgentCore::Browser",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _GEN_AI_BROWSER_ID: expected_identifier,
+            },
+            response_specific_attributes={
+                _GEN_AI_BROWSER_ID: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.StartBrowserSession",
+        )
+
+    def test_bedrock_agentcore_start_code_interpreter_session(self):
+        expected_identifier = "agentCodeInterpreter-m9Mvuwkg6j"
+        self.do_test_requests(
+            "bedrock-agentcore/codeinterpreter/startcodeinterpretersession/agentCodeInterpreter-m9Mvuwkg6j",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="StartCodeInterpreterSession",
+            remote_resource_type="AWS::BedrockAgentCore::CodeInterpreterCustom",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _GEN_AI_CODE_INTERPRETER_ID: expected_identifier,
+            },
+            response_specific_attributes={
+                _GEN_AI_CODE_INTERPRETER_ID: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.StartCodeInterpreterSession",
+        )
+
+    def test_bedrock_agentcore_start_code_interpreter_session_v1(self):
+        expected_identifier = "aws.codeinterpreter.v1"
+        self.do_test_requests(
+            "bedrock-agentcore/codeinterpreter/startcodeinterpretersession/aws.codeinterpreter.v1",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="StartCodeInterpreterSession",
+            remote_resource_type="AWS::BedrockAgentCore::CodeInterpreter",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _GEN_AI_CODE_INTERPRETER_ID: expected_identifier,
+            },
+            response_specific_attributes={
+                _GEN_AI_CODE_INTERPRETER_ID: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.StartCodeInterpreterSession",
+        )
+
+    def test_bedrock_agentcore_create_event(self):
+        expected_identifier = "agentMemory-1mtr9C5pGt"
+        self.do_test_requests(
+            "bedrock-agentcore/memory/createevent/agentMemory-1mtr9C5pGt",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateEvent",
+            remote_resource_type="AWS::BedrockAgentCore::Memory",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _GEN_AI_MEMORY_ID: expected_identifier,
+            },
+            response_specific_attributes={
+                _GEN_AI_MEMORY_ID: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.CreateEvent",
+        )
+
+    def test_bedrock_agentcore_create_memory(self):
+        expected_identifier = "testMemory-abc123def456"
+        self.do_test_requests(
+            "bedrock-agentcore/memory/creatememory/testMemory-abc123def456",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateMemory",
+            remote_resource_type="AWS::BedrockAgentCore::Memory",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=(
+                f"arn:aws:bedrock-agentcore:us-west-2:123456789012:memory/{expected_identifier}"
+            ),
+            response_specific_attributes={
+                _GEN_AI_MEMORY_ID: expected_identifier,
+                _AWS_BEDROCK_AGENTCORE_MEMORY_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:memory/{expected_identifier}"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateMemory",
+        )
+
+    def test_bedrock_agentcore_create_gateway(self):
+        expected_identifier = "agentGateway-k8Nt2pLm9Q"
+        self.do_test_requests(
+            "bedrock-agentcore/gateway/creategateway/agentGateway-k8Nt2pLm9Q",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateGateway",
+            remote_resource_type="AWS::BedrockAgentCore::Gateway",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            response_specific_attributes={
+                _GEN_AI_GATEWAY_ID: expected_identifier,
+                _AWS_BEDROCK_AGENTCORE_GATEWAY_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/{expected_identifier}"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateGateway",
+        )
+
+    def test_bedrock_agentcore_create_gateway_target(self):
+        gateway_id = "workinggateway-oersefsjga"
+        target_id = "testTarget-123"
+        self.do_test_requests(
+            "bedrock-agentcore/gateway/creategatewaytarget/workinggateway-oersefsjga",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateGatewayTarget",
+            remote_resource_type="AWS::BedrockAgentCore::GatewayTarget",
+            remote_resource_identifier=gateway_id,
+            cloudformation_primary_identifier=gateway_id,
+            request_specific_attributes={
+                _GEN_AI_GATEWAY_ID: gateway_id,
+            },
+            response_specific_attributes={
+                _AWS_GATEWAY_TARGET_ID: target_id,
+                _AWS_BEDROCK_AGENTCORE_GATEWAY_ARN: (
+                    f"arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/{gateway_id}"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateGatewayTarget",
+        )
+
+    def test_bedrock_agentcore_create_oauth2_credential_provider(self):
+        expected_identifier = "test-oauth2-provider-123"
+        self.do_test_requests(
+            "bedrock-agentcore/identity/createoauth2credentialprovider",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateOauth2CredentialProvider",
+            remote_resource_type="AWS::BedrockAgentCore::OAuth2CredentialProvider",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            response_specific_attributes={
+                _AWS_AUTH_CREDENTIAL_PROVIDER: (
+                    f"arn:aws:acps:us-west-2:123456789012:"
+                    f"token-vault/default/oauth2credentialprovider/{expected_identifier}"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateOauth2CredentialProvider",
+        )
+
+    def test_bedrock_agentcore_create_api_key_credential_provider(self):
+        expected_identifier = "test-apikey-provider-123"
+        self.do_test_requests(
+            "bedrock-agentcore/identity/createapikeycredentialprovider",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore Control",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="CreateApiKeyCredentialProvider",
+            remote_resource_type="AWS::BedrockAgentCore::APIKeyCredentialProvider",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            response_specific_attributes={
+                _AWS_AUTH_CREDENTIAL_PROVIDER: (
+                    f"arn:aws:acps:us-west-2:123456789012:"
+                    f"token-vault/default/apikeycredentialprovider/{expected_identifier}"
+                ),
+            },
+            span_name="Bedrock AgentCore Control.CreateApiKeyCredentialProvider",
+        )
+
+    def test_bedrock_agentcore_get_resource_oauth2_token(self):
+        expected_identifier = "test-oauth2-provider-123"
+        self.do_test_requests(
+            "bedrock-agentcore/identity/getresourceoauth2token",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="GetResourceOauth2Token",
+            remote_resource_type="AWS::BedrockAgentCore::OAuth2CredentialProvider",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _AWS_AUTH_CREDENTIAL_PROVIDER: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.GetResourceOauth2Token",
+        )
+
+    def test_bedrock_agentcore_get_resource_api_key(self):
+        expected_identifier = "test-apikey-provider-123"
+        self.do_test_requests(
+            "bedrock-agentcore/identity/getresourceapikey",
+            "GET",
+            200,
+            0,
+            0,
+            rpc_service="Bedrock AgentCore",
+            remote_service="AWS::BedrockAgentCore",
+            remote_operation="GetResourceApiKey",
+            remote_resource_type="AWS::BedrockAgentCore::APIKeyCredentialProvider",
+            remote_resource_identifier=expected_identifier,
+            cloudformation_primary_identifier=expected_identifier,
+            request_specific_attributes={
+                _AWS_AUTH_CREDENTIAL_PROVIDER: expected_identifier,
+            },
+            span_name="Bedrock AgentCore.GetResourceApiKey",
         )
 
     def test_secretsmanager_describe_secret(self):
@@ -905,6 +1293,26 @@ class BotocoreTest(ContractTestBase):
             span_name="SFN.ListStateMachineVersions",
         )
 
+    def test_cross_account(self):
+        self.do_test_requests(
+            "cross-account/createbucket/account_b",
+            "GET",
+            200,
+            0,
+            0,
+            remote_service="AWS::S3",
+            remote_operation="CreateBucket",
+            remote_resource_type="AWS::S3::Bucket",
+            remote_resource_identifier="cross-account-bucket",
+            cloudformation_primary_identifier="cross-account-bucket",
+            request_specific_attributes={
+                SpanAttributes.AWS_S3_BUCKET: "cross-account-bucket",
+            },
+            remote_resource_access_key="account_b_access_key_id",
+            remote_resource_region="eu-central-1",
+            span_name="S3.CreateBucket",
+        )
+
     # TODO: Add contract test for lambda event source mapping resource
 
     @override
@@ -924,6 +1332,9 @@ class BotocoreTest(ContractTestBase):
             kwargs.get("remote_resource_type", "None"),
             kwargs.get("remote_resource_identifier", "None"),
             kwargs.get("cloudformation_primary_identifier", "None"),
+            kwargs.get("remote_resource_account_id", "None"),
+            kwargs.get("remote_resource_access_key", "None"),
+            kwargs.get("remote_resource_region", "None"),
         )
 
     def _assert_aws_attributes(
@@ -935,6 +1346,9 @@ class BotocoreTest(ContractTestBase):
         remote_resource_type: str,
         remote_resource_identifier: str,
         cloudformation_primary_identifier: str,
+        remote_resource_account_id: str,
+        remote_resource_access_key: str,
+        remote_resource_region: str,
     ) -> None:
         attributes_dict: Dict[str, AnyValue] = self._get_attributes_dict(attributes_list)
         self._assert_str_attribute(attributes_dict, AWS_LOCAL_SERVICE, self.get_application_otel_service_name())
@@ -961,8 +1375,16 @@ class BotocoreTest(ContractTestBase):
                 self._assert_str_attribute(
                     attributes_dict, AWS_CLOUDFORMATION_PRIMARY_IDENTIFIER, cloudformation_primary_identifier
                 )
-        # See comment above AWS_LOCAL_OPERATION
-        self._assert_str_attribute(attributes_dict, AWS_SPAN_KIND, span_kind)
+        if remote_resource_account_id != "None":
+            assert remote_resource_identifier != "None"
+            self._assert_str_attribute(attributes_dict, AWS_REMOTE_RESOURCE_ACCOUNT_ID, remote_resource_account_id)
+            self.assertIsNone(attributes_dict.get(AWS_REMOTE_RESOURCE_ACCESS_KEY))
+        if remote_resource_access_key != "None":
+            assert remote_resource_identifier != "None"
+            self._assert_str_attribute(attributes_dict, AWS_REMOTE_RESOURCE_ACCESS_KEY, remote_resource_access_key)
+            self.assertIsNone(attributes_dict.get(AWS_REMOTE_RESOURCE_ACCOUNT_ID))
+        if remote_resource_region != "None":
+            self._assert_str_attribute(attributes_dict, AWS_REMOTE_RESOURCE_REGION, remote_resource_region)
 
     @override
     def _assert_semantic_conventions_span_attributes(
@@ -1026,6 +1448,7 @@ class BotocoreTest(ContractTestBase):
         expected_sum: int,
         **kwargs,
     ) -> None:
+        # pylint: disable=too-many-locals
         target_metrics: List[Metric] = []
         for resource_scope_metric in resource_scope_metrics:
             if resource_scope_metric.metric.name.lower() == metric_name.lower():
@@ -1050,6 +1473,9 @@ class BotocoreTest(ContractTestBase):
         self._assert_str_attribute(attribute_dict, AWS_SPAN_KIND, "CLIENT")
         remote_resource_type = kwargs.get("remote_resource_type", "None")
         remote_resource_identifier = kwargs.get("remote_resource_identifier", "None")
+        remote_resource_account_id = kwargs.get("remote_resource_account_id", "None")
+        remote_resource_access_key = kwargs.get("remote_resource_access_key", "None")
+        remote_resource_region = kwargs.get("remote_resource_region", "None")
         if remote_resource_type != "None":
             self._assert_str_attribute(attribute_dict, AWS_REMOTE_RESOURCE_TYPE, remote_resource_type)
         if remote_resource_identifier != "None":
@@ -1057,6 +1483,16 @@ class BotocoreTest(ContractTestBase):
                 self._assert_match_attribute(attribute_dict, AWS_REMOTE_RESOURCE_IDENTIFIER, remote_resource_identifier)
             else:
                 self._assert_str_attribute(attribute_dict, AWS_REMOTE_RESOURCE_IDENTIFIER, remote_resource_identifier)
+        if remote_resource_account_id != "None":
+            assert remote_resource_identifier != "None"
+            self._assert_str_attribute(attribute_dict, AWS_REMOTE_RESOURCE_ACCOUNT_ID, remote_resource_account_id)
+            self.assertIsNone(attribute_dict.get(AWS_REMOTE_RESOURCE_ACCESS_KEY))
+        if remote_resource_access_key != "None":
+            assert remote_resource_identifier != "None"
+            self._assert_str_attribute(attribute_dict, AWS_REMOTE_RESOURCE_ACCESS_KEY, remote_resource_access_key)
+            self.assertIsNone(attribute_dict.get(AWS_REMOTE_RESOURCE_ACCOUNT_ID))
+        if remote_resource_region != "None":
+            self._assert_str_attribute(attribute_dict, AWS_REMOTE_RESOURCE_REGION, remote_resource_region)
         self.check_sum(metric_name, dependency_dp.sum, expected_sum)
 
         attribute_dict: Dict[str, AnyValue] = self._get_attributes_dict(service_dp.attributes)

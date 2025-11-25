@@ -7,6 +7,12 @@ on:
       - "release/v*"
       - ci-workflow
   workflow_dispatch: # be able to run the workflow on demand
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to checkout'
+        required: false
+        type: string
 env:
   AWS_DEFAULT_REGION: us-east-1
   STAGING_ECR_REGISTRY: 637423224110.dkr.ecr.us-east-1.amazonaws.com
@@ -33,7 +39,9 @@ jobs:
       staging_wheel_file: ${{ steps.staging_wheel_output.outputs.STAGING_WHEEL}}
     steps:
       - name: Checkout Repo @ SHA - ${{ github.sha }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 #5.0.0
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Get Python Distro Output
         id: python_output
@@ -87,7 +95,7 @@ jobs:
           aws s3 cp dist/${{ steps.staging_wheel_output.outputs.STAGING_WHEEL}} s3://${{ env.STAGING_S3_BUCKET }}
 
       - name: Upload Wheel to GitHub Actions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 #v4.6.2
         with:
           name: ${{ steps.staging_wheel_output.outputs.STAGING_WHEEL}}
           path: dist/${{ steps.staging_wheel_output.outputs.STAGING_WHEEL}}
@@ -109,3 +117,23 @@ jobs:
     with:
       staging-wheel-name: ${{ needs.build.outputs.staging_wheel_file }}
       adot-image-name: ${{ needs.build.outputs.staging_registry }}/aws-observability/adot-autoinstrumentation-python-staging:${{ needs.build.outputs.python_image_tag }}
+
+  publish-main-build-status:
+    name: "Publish Main Build Status"
+    needs: [ build, application-signals-e2e-test ]
+    runs-on: ubuntu-latest
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/v'))
+    steps:
+      - name: Configure AWS Credentials for emitting metrics
+        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 #5.0.0
+        with:
+          role-to-assume: ${{ secrets.MONITORING_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Publish main build status
+        run: |
+          value="${{ needs.build.result == 'success' && needs.application-signals-e2e-test.result == 'success' && '0.0' || '1.0'}}"
+          aws cloudwatch put-metric-data --namespace 'ADOT/GitHubActions' \
+            --metric-name Failure \
+            --dimensions repository=${{ github.repository }},branch=${{ github.ref_name }},workflow=main_build \
+            --value $value

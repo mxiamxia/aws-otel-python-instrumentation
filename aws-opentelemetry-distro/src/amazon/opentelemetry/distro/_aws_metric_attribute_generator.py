@@ -7,12 +7,24 @@ from typing import Match, Optional
 from urllib.parse import ParseResult, urlparse
 
 from amazon.opentelemetry.distro._aws_attribute_keys import (
+    AWS_AUTH_ACCESS_KEY,
+    AWS_AUTH_CREDENTIAL_PROVIDER,
+    AWS_AUTH_REGION,
     AWS_BEDROCK_AGENT_ID,
+    AWS_BEDROCK_AGENTCORE_BROWSER_ARN,
+    AWS_BEDROCK_AGENTCORE_CODE_INTERPRETER_ARN,
+    AWS_BEDROCK_AGENTCORE_GATEWAY_ARN,
+    AWS_BEDROCK_AGENTCORE_MEMORY_ARN,
+    AWS_BEDROCK_AGENTCORE_RUNTIME_ARN,
+    AWS_BEDROCK_AGENTCORE_RUNTIME_ENDPOINT_ARN,
     AWS_BEDROCK_DATA_SOURCE_ID,
     AWS_BEDROCK_GUARDRAIL_ARN,
     AWS_BEDROCK_GUARDRAIL_ID,
     AWS_BEDROCK_KNOWLEDGE_BASE_ID,
     AWS_CLOUDFORMATION_PRIMARY_IDENTIFIER,
+    AWS_DYNAMODB_TABLE_ARN,
+    AWS_GATEWAY_TARGET_ID,
+    AWS_KINESIS_STREAM_ARN,
     AWS_KINESIS_STREAM_NAME,
     AWS_LAMBDA_FUNCTION_ARN,
     AWS_LAMBDA_FUNCTION_NAME,
@@ -22,7 +34,10 @@ from amazon.opentelemetry.distro._aws_attribute_keys import (
     AWS_REMOTE_DB_USER,
     AWS_REMOTE_ENVIRONMENT,
     AWS_REMOTE_OPERATION,
+    AWS_REMOTE_RESOURCE_ACCESS_KEY,
+    AWS_REMOTE_RESOURCE_ACCOUNT_ID,
     AWS_REMOTE_RESOURCE_IDENTIFIER,
+    AWS_REMOTE_RESOURCE_REGION,
     AWS_REMOTE_RESOURCE_TYPE,
     AWS_REMOTE_SERVICE,
     AWS_SECRETSMANAGER_SECRET_ARN,
@@ -35,7 +50,6 @@ from amazon.opentelemetry.distro._aws_attribute_keys import (
 )
 from amazon.opentelemetry.distro._aws_resource_attribute_configurator import get_service_attribute
 from amazon.opentelemetry.distro._aws_span_processing_util import (
-    GEN_AI_REQUEST_MODEL,
     LOCAL_ROOT,
     MAX_KEYWORD_LENGTH,
     SQL_KEYWORD_PATTERN,
@@ -57,9 +71,18 @@ from amazon.opentelemetry.distro.metric_attribute_generator import (
     SERVICE_METRIC,
     MetricAttributeGenerator,
 )
+from amazon.opentelemetry.distro.patches.semconv._incubating.attributes.gen_ai_attributes import (
+    GEN_AI_BROWSER_ID,
+    GEN_AI_CODE_INTERPRETER_ID,
+    GEN_AI_GATEWAY_ID,
+    GEN_AI_MEMORY_ID,
+    GEN_AI_RUNTIME_ID,
+)
+from amazon.opentelemetry.distro.regional_resource_arn_parser import RegionalResourceArnParser
 from amazon.opentelemetry.distro.sqs_url_parser import SqsUrlParser
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import BoundedAttributes, ReadableSpan
+from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import GEN_AI_REQUEST_MODEL
 from opentelemetry.semconv.trace import SpanAttributes
 
 # Pertinent OTEL attribute keys
@@ -97,14 +120,32 @@ _NORMALIZED_S3_SERVICE_NAME: str = "AWS::S3"
 _NORMALIZED_SQS_SERVICE_NAME: str = "AWS::SQS"
 _NORMALIZED_BEDROCK_SERVICE_NAME: str = "AWS::Bedrock"
 _NORMALIZED_BEDROCK_RUNTIME_SERVICE_NAME: str = "AWS::BedrockRuntime"
+_NORMALIZED_BEDROCK_AGENTCORE_SERVICE_NAME: str = "AWS::BedrockAgentCore"
 _NORMALIZED_SECRETSMANAGER_SERVICE_NAME: str = "AWS::SecretsManager"
 _NORMALIZED_SNS_SERVICE_NAME: str = "AWS::SNS"
 _NORMALIZED_STEPFUNCTIONS_SERVICE_NAME: str = "AWS::StepFunctions"
 _NORMALIZED_LAMBDA_SERVICE_NAME: str = "AWS::Lambda"
 _DB_CONNECTION_STRING_TYPE: str = "DB::Connection"
 
+# Constants for Lambda operations
+_LAMBDA_APPLICATION_SIGNALS_REMOTE_ENVIRONMENT: str = "LAMBDA_APPLICATION_SIGNALS_REMOTE_ENVIRONMENT"
+_LAMBDA_INVOKE_OPERATION: str = "Invoke"
+
 # Special DEPENDENCY attribute value if GRAPHQL_OPERATION_TYPE attribute key is present.
 _GRAPHQL: str = "graphql"
+
+# AWS SDK service mapping for normalization
+_AWS_SDK_SERVICE_MAPPING = {
+    "Bedrock Agent": _NORMALIZED_BEDROCK_SERVICE_NAME,
+    "Bedrock Agent Runtime": _NORMALIZED_BEDROCK_SERVICE_NAME,
+    "Bedrock Runtime": _NORMALIZED_BEDROCK_RUNTIME_SERVICE_NAME,
+    "Bedrock AgentCore Control": _NORMALIZED_BEDROCK_AGENTCORE_SERVICE_NAME,
+    "Bedrock AgentCore": _NORMALIZED_BEDROCK_AGENTCORE_SERVICE_NAME,
+    "Secrets Manager": _NORMALIZED_SECRETSMANAGER_SERVICE_NAME,
+    "SNS": _NORMALIZED_SNS_SERVICE_NAME,
+    "SFN": _NORMALIZED_STEPFUNCTIONS_SERVICE_NAME,
+    "Lambda": _NORMALIZED_LAMBDA_SERVICE_NAME,
+}
 
 _logger: Logger = getLogger(__name__)
 
@@ -144,7 +185,12 @@ def _generate_dependency_metric_attributes(span: ReadableSpan, resource: Resourc
     _set_service(resource, span, attributes)
     _set_egress_operation(span, attributes)
     _set_remote_service_and_operation(span, attributes)
-    _set_remote_type_and_identifier(span, attributes)
+    is_remote_identifier_present = _set_remote_type_and_identifier(span, attributes)
+    if is_remote_identifier_present:
+        is_remote_account_id_present = _set_remote_account_id_and_region(span, attributes)
+        if not is_remote_account_id_present:
+            _set_remote_access_key_and_region(span, attributes)
+    _set_remote_environment(span, attributes)
     _set_remote_db_user(span, attributes)
     _set_span_kind_for_dependency(span, attributes)
     return attributes
@@ -310,15 +356,15 @@ def _normalize_remote_service_name(span: ReadableSpan, service_name: str) -> str
     as the associated remote resource (Model) is not listed in Cloud Control.
     """
     if is_aws_sdk_span(span):
-        aws_sdk_service_mapping = {
-            "Bedrock Agent": _NORMALIZED_BEDROCK_SERVICE_NAME,
-            "Bedrock Agent Runtime": _NORMALIZED_BEDROCK_SERVICE_NAME,
-            "Bedrock Runtime": _NORMALIZED_BEDROCK_RUNTIME_SERVICE_NAME,
-            "Secrets Manager": _NORMALIZED_SECRETSMANAGER_SERVICE_NAME,
-            "SNS": _NORMALIZED_SNS_SERVICE_NAME,
-            "SFN": _NORMALIZED_STEPFUNCTIONS_SERVICE_NAME,
-        }
-        return aws_sdk_service_mapping.get(service_name, "AWS::" + service_name)
+        # Special handling for Lambda invoke operations
+        if _is_lambda_invoke_operation(span):
+            lambda_function_name = span.attributes.get(AWS_LAMBDA_FUNCTION_NAME)
+            # If Lambda name is not present, use UnknownRemoteService
+            # This is intentional - we want to clearly indicate when the Lambda function name
+            # is missing rather than falling back to a generic service name
+            return lambda_function_name if lambda_function_name else UNKNOWN_REMOTE_SERVICE
+
+        return _AWS_SDK_SERVICE_MAPPING.get(service_name, "AWS::" + service_name)
     return service_name
 
 
@@ -368,7 +414,7 @@ def _generate_remote_operation(span: ReadableSpan) -> str:
 
 
 # pylint: disable=too-many-branches,too-many-statements
-def _set_remote_type_and_identifier(span: ReadableSpan, attributes: BoundedAttributes) -> None:
+def _set_remote_type_and_identifier(span: ReadableSpan, attributes: BoundedAttributes) -> bool:
     """
     Remote resource attributes {@link AwsAttributeKeys#AWS_REMOTE_RESOURCE_TYPE} and {@link
     AwsAttributeKeys#AWS_REMOTE_RESOURCE_IDENTIFIER} are used to store information about the resource associated with
@@ -388,9 +434,23 @@ def _set_remote_type_and_identifier(span: ReadableSpan, attributes: BoundedAttri
         if is_key_present(span, _AWS_TABLE_NAMES) and len(span.attributes.get(_AWS_TABLE_NAMES)) == 1:
             remote_resource_type = _NORMALIZED_DYNAMO_DB_SERVICE_NAME + "::Table"
             remote_resource_identifier = _escape_delimiters(span.attributes.get(_AWS_TABLE_NAMES)[0])
+        elif is_key_present(span, AWS_DYNAMODB_TABLE_ARN):
+            remote_resource_type = _NORMALIZED_DYNAMO_DB_SERVICE_NAME + "::Table"
+            remote_resource_identifier = _escape_delimiters(
+                RegionalResourceArnParser.extract_dynamodb_table_name_from_arn(
+                    span.attributes.get(AWS_DYNAMODB_TABLE_ARN)
+                )
+            )
         elif is_key_present(span, AWS_KINESIS_STREAM_NAME):
             remote_resource_type = _NORMALIZED_KINESIS_SERVICE_NAME + "::Stream"
             remote_resource_identifier = _escape_delimiters(span.attributes.get(AWS_KINESIS_STREAM_NAME))
+        elif is_key_present(span, AWS_KINESIS_STREAM_ARN):
+            remote_resource_type = _NORMALIZED_KINESIS_SERVICE_NAME + "::Stream"
+            remote_resource_identifier = _escape_delimiters(
+                RegionalResourceArnParser.extract_kinesis_stream_name_from_arn(
+                    span.attributes.get(AWS_KINESIS_STREAM_ARN)
+                )
+            )
         elif is_key_present(span, _AWS_BUCKET_NAME):
             remote_resource_type = _NORMALIZED_S3_SERVICE_NAME + "::Bucket"
             remote_resource_identifier = _escape_delimiters(span.attributes.get(_AWS_BUCKET_NAME))
@@ -425,47 +485,52 @@ def _set_remote_type_and_identifier(span: ReadableSpan, attributes: BoundedAttri
         elif is_key_present(span, GEN_AI_REQUEST_MODEL):
             remote_resource_type = _NORMALIZED_BEDROCK_SERVICE_NAME + "::Model"
             remote_resource_identifier = _escape_delimiters(span.attributes.get(GEN_AI_REQUEST_MODEL))
+        elif (
+            _AWS_SDK_SERVICE_MAPPING.get(str(span.attributes.get(_RPC_SERVICE)))
+            == _NORMALIZED_BEDROCK_AGENTCORE_SERVICE_NAME
+        ):
+            agentcore_type, agentcore_identifier, agentcore_cfn_id = (
+                _get_bedrock_agentcore_resource_type_and_identifier(span)
+            )
+            remote_resource_type = agentcore_type
+            remote_resource_identifier = _escape_delimiters(agentcore_identifier) if agentcore_identifier else None
+            cloudformation_primary_identifier = _escape_delimiters(agentcore_cfn_id) if agentcore_cfn_id else None
         elif is_key_present(span, AWS_SECRETSMANAGER_SECRET_ARN):
             remote_resource_type = _NORMALIZED_SECRETSMANAGER_SERVICE_NAME + "::Secret"
-            remote_resource_identifier = _escape_delimiters(span.attributes.get(AWS_SECRETSMANAGER_SECRET_ARN)).split(
-                ":"
-            )[-1]
+            remote_resource_identifier = _escape_delimiters(
+                RegionalResourceArnParser.extract_resource_name_from_arn(
+                    span.attributes.get(AWS_SECRETSMANAGER_SECRET_ARN)
+                )
+            )
             cloudformation_primary_identifier = _escape_delimiters(span.attributes.get(AWS_SECRETSMANAGER_SECRET_ARN))
         elif is_key_present(span, AWS_SNS_TOPIC_ARN):
             remote_resource_type = _NORMALIZED_SNS_SERVICE_NAME + "::Topic"
-            remote_resource_identifier = _escape_delimiters(span.attributes.get(AWS_SNS_TOPIC_ARN)).split(":")[-1]
+            remote_resource_identifier = _escape_delimiters(
+                RegionalResourceArnParser.extract_resource_name_from_arn(span.attributes.get(AWS_SNS_TOPIC_ARN))
+            )
             cloudformation_primary_identifier = _escape_delimiters(span.attributes.get(AWS_SNS_TOPIC_ARN))
         elif is_key_present(span, AWS_STEPFUNCTIONS_STATEMACHINE_ARN):
             remote_resource_type = _NORMALIZED_STEPFUNCTIONS_SERVICE_NAME + "::StateMachine"
             remote_resource_identifier = _escape_delimiters(
-                span.attributes.get(AWS_STEPFUNCTIONS_STATEMACHINE_ARN)
-            ).split(":")[-1]
+                RegionalResourceArnParser.extract_resource_name_from_arn(
+                    span.attributes.get(AWS_STEPFUNCTIONS_STATEMACHINE_ARN)
+                )
+            )
             cloudformation_primary_identifier = _escape_delimiters(
                 span.attributes.get(AWS_STEPFUNCTIONS_STATEMACHINE_ARN)
             )
         elif is_key_present(span, AWS_STEPFUNCTIONS_ACTIVITY_ARN):
             remote_resource_type = _NORMALIZED_STEPFUNCTIONS_SERVICE_NAME + "::Activity"
-            remote_resource_identifier = _escape_delimiters(span.attributes.get(AWS_STEPFUNCTIONS_ACTIVITY_ARN)).split(
-                ":"
-            )[-1]
+            remote_resource_identifier = _escape_delimiters(
+                RegionalResourceArnParser.extract_resource_name_from_arn(
+                    span.attributes.get(AWS_STEPFUNCTIONS_ACTIVITY_ARN)
+                )
+            )
             cloudformation_primary_identifier = _escape_delimiters(span.attributes.get(AWS_STEPFUNCTIONS_ACTIVITY_ARN))
         elif is_key_present(span, AWS_LAMBDA_FUNCTION_NAME):
-            # Handling downstream Lambda as a service vs. an AWS resource:
-            # - If the method call is "Invoke", we treat downstream Lambda as a service.
-            # - Otherwise, we treat it as an AWS resource.
-            #
-            # This addresses a Lambda topology issue in Application Signals.
-            # More context in PR: https://github.com/aws-observability/aws-otel-python-instrumentation/pull/319
-            #
-            # NOTE: The env var LAMBDA_APPLICATION_SIGNALS_REMOTE_ENVIRONMENT was introduced as part of this fix.
-            # It is optional and allows users to override the default value if needed.
-            if span.attributes.get(_RPC_METHOD) == "Invoke":
-                attributes[AWS_REMOTE_SERVICE] = _escape_delimiters(span.attributes.get(AWS_LAMBDA_FUNCTION_NAME))
-
-                attributes[AWS_REMOTE_ENVIRONMENT] = (
-                    f'lambda:{os.environ.get("LAMBDA_APPLICATION_SIGNALS_REMOTE_ENVIRONMENT", "default")}'
-                )
-            else:
+            # For non-Invoke Lambda operations, treat Lambda as a resource,
+            # see normalize_remote_service_name for more information.
+            if not _is_lambda_invoke_operation(span):
                 remote_resource_type = _NORMALIZED_LAMBDA_SERVICE_NAME + "::Function"
                 remote_resource_identifier = _escape_delimiters(span.attributes.get(AWS_LAMBDA_FUNCTION_NAME))
                 cloudformation_primary_identifier = _escape_delimiters(span.attributes.get(AWS_LAMBDA_FUNCTION_ARN))
@@ -489,6 +554,74 @@ def _set_remote_type_and_identifier(span: ReadableSpan, attributes: BoundedAttri
         attributes[AWS_REMOTE_RESOURCE_TYPE] = remote_resource_type
         attributes[AWS_REMOTE_RESOURCE_IDENTIFIER] = remote_resource_identifier
         attributes[AWS_CLOUDFORMATION_PRIMARY_IDENTIFIER] = cloudformation_primary_identifier
+        return True
+    return False
+
+
+def _set_remote_account_id_and_region(span: ReadableSpan, attributes: BoundedAttributes) -> bool:
+    arn_attributes = [
+        AWS_DYNAMODB_TABLE_ARN,
+        AWS_KINESIS_STREAM_ARN,
+        AWS_SNS_TOPIC_ARN,
+        AWS_SECRETSMANAGER_SECRET_ARN,
+        AWS_STEPFUNCTIONS_STATEMACHINE_ARN,
+        AWS_STEPFUNCTIONS_ACTIVITY_ARN,
+        AWS_BEDROCK_GUARDRAIL_ARN,
+        AWS_LAMBDA_FUNCTION_ARN,
+    ]
+    remote_account_id: Optional[str] = None
+    remote_region: Optional[str] = None
+
+    if is_key_present(span, AWS_SQS_QUEUE_URL):
+        queue_url = _escape_delimiters(span.attributes.get(AWS_SQS_QUEUE_URL))
+        remote_account_id = SqsUrlParser.get_account_id(queue_url)
+        remote_region = SqsUrlParser.get_region(queue_url)
+    else:
+        for arn_attribute in arn_attributes:
+            if is_key_present(span, arn_attribute):
+                arn = span.attributes.get(arn_attribute)
+                remote_account_id = RegionalResourceArnParser.get_account_id(arn)
+                remote_region = RegionalResourceArnParser.get_region(arn)
+                break
+
+    if remote_account_id is not None and remote_region is not None:
+        attributes[AWS_REMOTE_RESOURCE_ACCOUNT_ID] = remote_account_id
+        attributes[AWS_REMOTE_RESOURCE_REGION] = remote_region
+        return True
+    return False
+
+
+def _set_remote_access_key_and_region(span: ReadableSpan, attributes: BoundedAttributes) -> None:
+    if is_key_present(span, AWS_AUTH_ACCESS_KEY):
+        attributes[AWS_REMOTE_RESOURCE_ACCESS_KEY] = span.attributes.get(AWS_AUTH_ACCESS_KEY)
+    if is_key_present(span, AWS_AUTH_REGION):
+        attributes[AWS_REMOTE_RESOURCE_REGION] = span.attributes.get(AWS_AUTH_REGION)
+
+
+def _set_remote_environment(span: ReadableSpan, attributes: BoundedAttributes) -> None:
+    """
+    Remote environment is used to identify the environment of downstream services. Currently only
+    set to "lambda:default" for Lambda Invoke operations when aws-api system is detected.
+    """
+    # We want to treat downstream Lambdas as a service rather than a resource because
+    # Application Signals topology map gets disconnected due to conflicting Lambda Entity
+    # definitions
+    # Additional context can be found in
+    # https://github.com/aws-observability/aws-otel-python-instrumentation/pull/319
+    if _is_lambda_invoke_operation(span):
+        remote_environment = os.environ.get(_LAMBDA_APPLICATION_SIGNALS_REMOTE_ENVIRONMENT, "").strip()
+        if not remote_environment:
+            remote_environment = "default"
+        attributes[AWS_REMOTE_ENVIRONMENT] = f"lambda:{remote_environment}"
+
+
+def _is_lambda_invoke_operation(span: ReadableSpan) -> bool:
+    """Check if the span represents a Lambda Invoke operation."""
+    if not is_aws_sdk_span(span):
+        return False
+
+    rpc_service = _get_remote_service(span, _RPC_SERVICE)
+    return rpc_service == "Lambda" and span.attributes.get(_RPC_METHOD) == _LAMBDA_INVOKE_OPERATION
 
 
 def _get_db_connection(span: ReadableSpan) -> None:
@@ -568,6 +701,217 @@ def _set_remote_db_user(span: ReadableSpan, attributes: BoundedAttributes) -> No
 def _set_span_kind_for_dependency(span: ReadableSpan, attributes: BoundedAttributes) -> None:
     span_kind: str = span.kind.name
     attributes[AWS_SPAN_KIND] = span_kind
+
+
+def _get_bedrock_agentcore_resource_type_and_identifier(
+    span: ReadableSpan,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Get BedrockAgentCore resource type, identifier, and CFN primary identifier based on span attributes."""
+    attrs = span.attributes
+    if not attrs:
+        return None, None, None
+
+    def format_resource_type(resource_type: Optional[str]) -> Optional[str]:
+        return f"{_NORMALIZED_BEDROCK_AGENTCORE_SERVICE_NAME}::{resource_type}" if resource_type else None
+
+    for handler in [
+        _handle_browser_attrs,
+        _handle_gateway_attrs,
+        _handle_runtime_attrs,
+        _handle_code_interpreter_attrs,
+        _handle_identity_attrs,
+        _handle_memory_attrs,
+    ]:
+        resource_type, resource_identifier, cfn_primary_identifier = handler(attrs)
+        if resource_type:
+            return format_resource_type(resource_type), resource_identifier, cfn_primary_identifier
+
+    return None, None, None
+
+
+def _handle_browser_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore Browser resources.
+    Returns (resource_type, resource_identifier, cfn_primary_identifier).
+    """
+    browser_id = attrs.get(GEN_AI_BROWSER_ID)
+    browser_arn = attrs.get(AWS_BEDROCK_AGENTCORE_BROWSER_ARN)
+    if browser_id or browser_arn:
+        agentcore_cfn_identifier = None
+        if browser_id:
+            agentcore_cfn_identifier = str(browser_id)
+        elif browser_arn:
+            agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+                str(browser_arn)
+            )
+
+        # Uses browser ID as both resource identifier and CFN primary identifier.
+        # aws.browser.v1 is a managed AWS resource, custom IDs are user-defined resources.
+        resource_type = "Browser" if agentcore_cfn_identifier == "aws.browser.v1" else "BrowserCustom"
+        return resource_type, agentcore_cfn_identifier, agentcore_cfn_identifier
+    return None, None, None
+
+
+def _handle_gateway_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore Gateway resources.
+    Returns (resource_type, resource_identifier, cfn_primary_identifier).
+    """
+    gateway_id = attrs.get(GEN_AI_GATEWAY_ID)
+    gateway_arn = attrs.get(AWS_BEDROCK_AGENTCORE_GATEWAY_ARN)
+    gateway_target_id = attrs.get(AWS_GATEWAY_TARGET_ID)
+
+    if gateway_target_id:
+        if gateway_id:
+            agentcore_cfn_identifier = str(gateway_id)
+        elif gateway_arn:
+            agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+                str(gateway_arn)
+            )
+        else:
+            agentcore_cfn_identifier = str(gateway_target_id)
+
+        # GatewayTarget contains two primary identifiers: gateway ID and gateway target ID.
+        # Uses gateway ID and/or gateway target ID as both resource identifier and CFN primary identifier.
+        # If gateway ID exists or can be extracted from ARN, use it as CFN primary identifier,
+        # otherwise use target ID.
+        return "GatewayTarget", agentcore_cfn_identifier, agentcore_cfn_identifier
+
+    if gateway_arn or gateway_id:
+        agentcore_cfn_identifier = None
+        if gateway_id:
+            agentcore_cfn_identifier = str(gateway_id)
+        elif gateway_arn:
+            agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+                str(gateway_arn)
+            )
+
+        # Uses gateway ID as both resource identifier and CFN primary identifier.
+        # If gateway ID is not available, extract it from the gateway ARN.
+        return "Gateway", agentcore_cfn_identifier, agentcore_cfn_identifier
+
+    return None, None, None
+
+
+def _handle_runtime_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore Runtime resources.
+    Returns (resource_type, resource_identifier, cfn_primary_identifier).
+    """
+    runtime_id = attrs.get(GEN_AI_RUNTIME_ID)
+    runtime_arn = attrs.get(AWS_BEDROCK_AGENTCORE_RUNTIME_ARN)
+    runtime_endpoint_arn = attrs.get(AWS_BEDROCK_AGENTCORE_RUNTIME_ENDPOINT_ARN)
+
+    if runtime_endpoint_arn:
+        agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+            str(runtime_endpoint_arn)
+        )
+
+        # Uses extracted ID as resource identifier and full ARN as CFN primary identifier.
+        return "RuntimeEndpoint", agentcore_cfn_identifier, str(runtime_endpoint_arn)
+
+    if runtime_arn or runtime_id:
+        agentcore_cfn_identifier = None
+        if runtime_id:
+            agentcore_cfn_identifier = str(runtime_id)
+        elif runtime_arn:
+            agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+                str(runtime_arn)
+            )
+
+        # Uses runtime ID as both resource identifier and CFN primary identifier.
+        # If runtime ID is not available, extract it from the runtime ARN.
+        return "Runtime", agentcore_cfn_identifier, agentcore_cfn_identifier
+
+    return None, None, None
+
+
+def _handle_code_interpreter_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore CodeInterpreter resources.
+    Returns (resource_type, resource_identifier, cfn_primary_identifier).
+    """
+    code_interpreter_id = attrs.get(GEN_AI_CODE_INTERPRETER_ID)
+    code_interpreter_arn = attrs.get(AWS_BEDROCK_AGENTCORE_CODE_INTERPRETER_ARN)
+
+    if code_interpreter_id or code_interpreter_arn:
+        agentcore_cfn_identifier = None
+        if code_interpreter_id:
+            agentcore_cfn_identifier = str(code_interpreter_id)
+        elif code_interpreter_arn:
+            agentcore_cfn_identifier = RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(
+                str(code_interpreter_arn)
+            )
+
+        # Uses code interpreter ID as both resource identifier and CFN primary identifier.
+        # aws.codeinterpreter.v1 is a managed AWS resource, custom IDs are user-defined resources.
+        resource_type = (
+            "CodeInterpreter" if agentcore_cfn_identifier == "aws.codeinterpreter.v1" else "CodeInterpreterCustom"
+        )
+        return resource_type, agentcore_cfn_identifier, agentcore_cfn_identifier
+
+    return None, None, None
+
+
+def _handle_identity_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore Identity resources.
+    """
+    credentials_provider = attrs.get(AWS_AUTH_CREDENTIAL_PROVIDER)
+    rpc_method = attrs.get(_RPC_METHOD)
+
+    if credentials_provider and rpc_method:
+        credentials_provider_str = str(credentials_provider)
+        rpc_method_str = str(rpc_method).lower()
+        resource_type = None
+
+        # Determine the credential provider type from the RPC method.
+        # The credential provider can be either an ARN or a name. While ARNs contain
+        # type information, names do not, so we infer the type from the API operation.
+        if "apikey" in rpc_method_str:
+            resource_type = "APIKeyCredentialProvider"
+        elif "oauth2" in rpc_method_str:
+            resource_type = "OAuth2CredentialProvider"
+
+        if resource_type:
+            # CFN identifier is the credentials provider name.
+            # If the credentials provider is an ARN, we extract the name from the ARN.
+            agentcore_cfn_identifier = (
+                RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(credentials_provider_str)
+                or credentials_provider_str
+            )
+
+            # Uses credential name as both resource identifier and CFN primary identifier.
+            return resource_type, agentcore_cfn_identifier, agentcore_cfn_identifier
+
+    return None, None, None
+
+
+def _handle_memory_attrs(attrs: BoundedAttributes) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Handler for BedrockAgentCore Memory resources.
+    Returns (resource_type, resource_identifier, cfn_primary_identifier).
+    """
+    memory_id = attrs.get(GEN_AI_MEMORY_ID)
+    memory_arn = attrs.get(AWS_BEDROCK_AGENTCORE_MEMORY_ARN)
+
+    if memory_id or memory_arn:
+        agentcore_cfn_identifier = None
+        agentcore_cfn_primary_identifier = None
+        if memory_id:
+            agentcore_cfn_identifier = str(memory_id)
+        if memory_arn:
+            agentcore_cfn_identifier = (
+                agentcore_cfn_identifier
+                or RegionalResourceArnParser.extract_bedrock_agentcore_resource_id_from_arn(str(memory_arn))
+            )
+            agentcore_cfn_primary_identifier = str(memory_arn)
+
+        # Uses memory ID as resource identifier and ARN as CFN primary identifier when available.
+        # If memory ID is not available, extract it from the memory ARN.
+        return "Memory", agentcore_cfn_identifier, agentcore_cfn_primary_identifier
+
+    return None, None, None
 
 
 def _log_unknown_attribute(attribute_key: str, span: ReadableSpan) -> None:
