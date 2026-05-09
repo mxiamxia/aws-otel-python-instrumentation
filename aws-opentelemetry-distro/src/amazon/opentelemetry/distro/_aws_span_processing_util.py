@@ -3,6 +3,7 @@
 """Utility module designed to support shared logic across AWS Span Processors."""
 import json
 import os
+import re
 from typing import Dict, List
 from urllib.parse import ParseResult, urlparse
 
@@ -38,7 +39,9 @@ def _get_dialect_keywords() -> List[str]:
 
 
 # A regular expression pattern to match SQL keywords.
-SQL_KEYWORD_PATTERN = r"^(?:" + "|".join(_get_dialect_keywords()) + r")\b"
+# Optimization: Pre-compile the regex pattern at module level to avoid recompilation
+# during telemetry processing hot paths.
+SQL_KEYWORD_PATTERN = re.compile(r"^(?:" + "|".join(_get_dialect_keywords()) + r")\b")
 
 
 def get_ingress_operation(__, span: ReadableSpan) -> str:
