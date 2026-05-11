@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
+from typing import Optional
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -21,19 +23,40 @@ class _Matcher:
             return True
         if text is None or pattern is None:
             return False
-        if len(pattern) == 0:
+
+        pat_len = len(pattern)
+        if pat_len == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        if "*" not in pattern and "?" not in pattern:
+            return pattern == text
+
+        # Fast-paths for common wildcard patterns to avoid regex overhead
+        res = _Matcher._try_fast_wild_card_match(text, pattern, pat_len)
+        if res is not None:
+            return res
+
+        # Fallback to regex for complex patterns
+        return _get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _try_fast_wild_card_match(text: str, pattern: str, pat_len: int) -> Optional[bool]:
+        if "?" not in pattern:
+            star_count = pattern.count("*")
+            if star_count == 1:
+                if pattern[0] == "*":
+                    return text.endswith(pattern[1:])
+                if pattern[pat_len - 1] == "*":
+                    return text.startswith(pattern[:-1])
+            if star_count == 2 and pattern[0] == "*" and pattern[pat_len - 1] == "*":
+                return pattern[1:-1] in text
+        return None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
         token_start = -1
         regex_pattern = ""
         for index, char in enumerate(rule_pattern):
-            char = rule_pattern[index]
             if char in ("*", "?"):
                 if token_start != -1:
                     regex_pattern += re.escape(rule_pattern[token_start:index])
@@ -56,12 +79,15 @@ class _Matcher:
         if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        # Optimized to iterate over rule_attributes (O(R)) instead of span attributes (O(A))
+        # and early return on the first mismatch.
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None or not _Matcher.wild_card_match(val, pattern):
+                return False
+        return True
+
+
+@lru_cache(maxsize=1024)
+def _get_compiled_regex(pattern: str) -> re.Pattern:
+    return re.compile(_Matcher.to_regex_pattern(pattern))
