@@ -1,0 +1,3 @@
+## 2026-05-12 - Sampler Matcher Optimization
+**Learning:** In telemetry processing, X-Ray sampler matching is a hot path. The original implementation was O(A) where A is the number of span attributes, even if the rule only cared about a few. Also, regex matching for simple wildcards like `prefix*` is unnecessarily expensive in Python compared to built-in string methods.
+**Action:** Always iterate over rule attributes instead of span attributes. Implement fast-paths for `startswith`, `endswith`, and `in` for wildcard patterns before falling back to regex. Use `lru_cache` to avoid repeated regex generation.
