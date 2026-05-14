@@ -19,9 +19,18 @@ class TestMatcher(TestCase):
             ["HelloWorld", "Hell?W*d"],
             ["Hello.World", "*.World"],
             ["Bye.World", "*.World"],
+            ["HelloWorld", "*loW*"],  # *middle*
+            ["HelloWorld", "H*d"],  # regex
+            ["HelloWorld", "*"],  # asterisk only
+            ["abc", "a*"],  # prefix*
+            ["abc", "*c"],  # *suffix
+            ["abc", "*b*"],  # *middle*
         ]
         for test_case in test_cases:
-            self.assertTrue(_Matcher.wild_card_match(text=test_case[0], pattern=test_case[1]))
+            self.assertTrue(
+                _Matcher.wild_card_match(text=test_case[0], pattern=test_case[1]),
+                f"Failed for text='{test_case[0]}' pattern='{test_case[1]}'",
+            )
 
     def test_wild_card_not_match(self):
         test_cases = [[None, "Hello*"], ["HelloWorld", None]]
