@@ -1,0 +1,3 @@
+## 2026-05-16 - [Optimizing Wildcard and Attribute Matching]
+**Learning:** Significant performance gains (~80% in benchmarks) can be achieved in telemetry hot-paths (sampling, metric generation) by implementing fast-paths for common wildcard patterns (starts with, ends with, contains) to bypass the regex engine. Additionally, caching compiled regex objects via `lru_cache` and ensuring attribute matching complexity is O(Rules) rather than O(Span Attributes) further reduces overhead.
+**Action:** Always identify high-frequency matching/filtering logic and implement specialized fast-paths for common string patterns. Use module-level pre-compilation for static regexes and `lru_cache` for dynamic ones.
