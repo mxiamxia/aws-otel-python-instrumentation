@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -16,6 +17,11 @@ cloud_platform_mapping = {
 
 class _Matcher:
     @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_compiled_regex(pattern: str) -> re.Pattern:
+        return re.compile(_Matcher.to_regex_pattern(pattern))
+
+    @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
         if pattern == "*":
             return True
@@ -23,10 +29,25 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        # Fast paths for common patterns
+        if "*" not in pattern and "?" not in pattern:
+            return text == pattern
+
+        if pattern.count("*") == 1 and "?" not in pattern:
+            if pattern.startswith("*"):
+                return text.endswith(pattern[1:])
+            if pattern.endswith("*"):
+                return text.startswith(pattern[:-1])
+            parts = pattern.split("*")
+            if len(parts) == 2:
+                return (
+                    text.startswith(parts[0])
+                    and text.endswith(parts[1])
+                    and len(text) >= len(parts[0]) + len(parts[1])
+                )
+
+        return _Matcher._get_compiled_regex(pattern).fullmatch(text) is not None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
