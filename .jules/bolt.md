@@ -1,0 +1,3 @@
+## 2026-05-19 - Optimization of Wildcard and Attribute Matching
+**Learning:** In telemetry hot paths like sampling or attribute filtering, iterating over the set of filter rules (O(R)) instead of the set of span attributes (O(A)) is significantly faster when spans have many attributes. Combining this with regex caching and fast-paths for simple string patterns (prefix/suffix/middle) provides a massive performance boost for common use cases.
+**Action:** Always prefer iterating over rule keys and using early returns for validation logic. Use 'functools.lru_cache' for on-the-fly regex compilation from configuration strings.
