@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import re
+from typing import Optional
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -14,6 +16,11 @@ cloud_platform_mapping = {
 }
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_compiled_regex(pattern: str):
+    return re.compile(_Matcher.to_regex_pattern(pattern))
+
+
 class _Matcher:
     @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
@@ -23,10 +30,38 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        fast_path_result = _Matcher._fast_path_match(text, pattern)
+        if fast_path_result is not None:
+            return fast_path_result
+
+        return _get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _fast_path_match(text: str, pattern: str) -> Optional[bool]:
+        # Exact match
+        if "*" not in pattern and "?" not in pattern:
+            return text == pattern
+
+        # prefix*
+        if pattern.endswith("*") and "*" not in pattern[:-1] and "?" not in pattern:
+            return text.startswith(pattern[:-1])
+
+        # *suffix
+        if pattern.startswith("*") and "*" not in pattern[1:] and "?" not in pattern:
+            return text.endswith(pattern[1:])
+
+        # *middle*
+        if (
+            pattern.startswith("*")
+            and pattern.endswith("*")
+            and len(pattern) >= 2
+            and "*" not in pattern[1:-1]
+            and "?" not in pattern
+        ):
+            return pattern[1:-1] in text
+
+        return None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:

@@ -1,0 +1,3 @@
+## 2024-05-20 - [Optimizing Telemetry Processing Hot Paths]
+**Learning:** Common wildcard patterns (prefix*, *suffix, *middle*) and large SQL keyword regexes are significant bottlenecks in sampling and metric generation logic. Python's `re` module overhead for repeated compilation of the same pattern or full regex evaluation for simple string matching can be bypassed for substantial gains.
+**Action:** Always implement fast-paths for simple string matching patterns before falling back to regex. Use `functools.lru_cache` for dynamic regex compilation and pre-compile static, large regexes at the module level.
