@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import re
+from typing import Tuple
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -16,17 +18,53 @@ cloud_platform_mapping = {
 
 class _Matcher:
     @staticmethod
+    @functools.lru_cache(maxsize=1024)
+    def _get_regex(pattern: str):
+        return re.compile(_Matcher.to_regex_pattern(pattern))
+
+    @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
+        """
+        Matches a string against a wildcard pattern.
+        '*' matches any number of characters.
+        '?' matches any single character.
+        """
         if pattern == "*":
             return True
         if text is None or pattern is None:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        # Fast path for exact match
+        if "*" not in pattern and "?" not in pattern:
+            return text == pattern
+
+        # Fast paths for simple wildcard patterns without '?'
+        if "?" not in pattern:
+            is_match, result = _Matcher._fast_wild_card_match(text, pattern)
+            if is_match:
+                return result
+
+        return _Matcher._get_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _fast_wild_card_match(text: str, pattern: str) -> Tuple[bool, bool]:
+        star_count = pattern.count("*")
+        if star_count == 1:
+            if pattern.endswith("*"):
+                return True, text.startswith(pattern[:-1])
+            if pattern.startswith("*"):
+                return True, text.endswith(pattern[1:])
+            parts = pattern.split("*")
+            return (
+                True,
+                len(text) >= len(pattern) - 1 and text.startswith(parts[0]) and text.endswith(parts[1]),
+            )
+        if star_count == 2 and pattern.startswith("*") and pattern.endswith("*"):
+            # *middle*
+            return True, pattern[1:-1] in text
+        return False, False
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
