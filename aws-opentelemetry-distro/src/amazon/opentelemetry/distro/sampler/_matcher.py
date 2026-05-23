@@ -1,5 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import re
 
 from opentelemetry.semconv.resource import CloudPlatformValues
@@ -21,12 +22,41 @@ class _Matcher:
             return True
         if text is None or pattern is None:
             return False
+
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        fast_match = _Matcher._wild_card_match_fast_path(text, pattern)
+        if fast_match is not None:
+            return fast_match
+
+        # Fallback to regex with caching
+        return _get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _wild_card_match_fast_path(text: str, pattern: str) -> bool:
+        """Internal fast-path for common wildcard patterns to avoid regex overhead."""
+        pattern_len = len(pattern)
+
+        if "*" not in pattern and "?" not in pattern:
+            return pattern == text
+
+        if pattern_len >= 2 and pattern[0] == "*" and pattern[-1] == "*":
+            middle = pattern[1:-1]
+            if "*" not in middle and "?" not in middle:
+                return middle in text
+
+        if pattern[-1] == "*":
+            prefix = pattern[:-1]
+            if "*" not in prefix and "?" not in prefix:
+                return text.startswith(prefix)
+
+        if pattern[0] == "*":
+            suffix = pattern[1:]
+            if "*" not in suffix and "?" not in suffix:
+                return text.endswith(suffix)
+
+        return None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
@@ -65,3 +95,9 @@ class _Matcher:
             if _Matcher.wild_card_match(text_to_match, pattern):
                 matched_count += 1
         return matched_count == len(rule_attributes)
+
+
+@functools.lru_cache(maxsize=1024)
+def _get_compiled_regex(pattern: str) -> re.Pattern:
+    """Helper to cache compiled regex objects for wildcard matching."""
+    return re.compile(_Matcher.to_regex_pattern(pattern))
