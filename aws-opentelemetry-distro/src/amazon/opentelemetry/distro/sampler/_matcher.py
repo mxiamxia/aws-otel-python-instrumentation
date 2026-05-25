@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -14,6 +15,11 @@ cloud_platform_mapping = {
 }
 
 
+@lru_cache(maxsize=1024)
+def _get_compiled_regex(pattern: str) -> re.Pattern:
+    return re.compile("^" + _Matcher.to_regex_pattern(pattern) + "$")
+
+
 class _Matcher:
     @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
@@ -23,17 +29,38 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        # Fast path for common cases
+        has_wildcard = "*" in pattern
+        has_question = "?" in pattern
+
+        if not has_wildcard and not has_question:
+            return pattern == text
+
+        # Special cases for simple wildcards
+        if not has_question:
+            return _Matcher._simple_wild_card_match(text, pattern)
+
+        return _get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _simple_wild_card_match(text: str, pattern: str) -> bool:
+        # Case: "prefix*"
+        if pattern.endswith("*") and "*" not in pattern[:-1]:
+            return text.startswith(pattern[:-1])
+        # Case: "*suffix"
+        if pattern.startswith("*") and "*" not in pattern[1:]:
+            return text.endswith(pattern[1:])
+        # Case: "*middle*"
+        if pattern.startswith("*") and pattern.endswith("*") and "*" not in pattern[1:-1]:
+            return pattern[1:-1] in text
+        return _get_compiled_regex(pattern).fullmatch(text) is not None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
         token_start = -1
         regex_pattern = ""
         for index, char in enumerate(rule_pattern):
-            char = rule_pattern[index]
             if char in ("*", "?"):
                 if token_start != -1:
                     regex_pattern += re.escape(rule_pattern[token_start:index])
