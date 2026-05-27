@@ -1,0 +1,3 @@
+## 2025-05-14 - Optimizing Sampler Matching Logic
+**Learning:** Iterating over span attributes (high cardinality) when matching against a sampler rule (low cardinality) is an O(A) operation that can be significantly improved. By switching the iteration to the rule attributes (O(R)), we achieve a performance boost proportional to the number of extra attributes on the span. Additionally, implementing fast-paths for common wildcard patterns (prefix, suffix, substring) avoids the high overhead of regex engine initialization and execution for simple matches.
+**Action:** Always identify which side of a comparison or matching operation has lower cardinality and iterate over that. Use native string methods for simple pattern matching before falling back to regex.
