@@ -51,17 +51,20 @@ class _Matcher:
 
     @staticmethod
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
+        """
+        Matches span attributes against rule attributes.
+        Iterates over rule attributes (O(R)) instead of span attributes (O(A))
+        to allow for early return and better performance when O(R) < O(A).
+        """
         if rule_attributes is None or len(rule_attributes) == 0:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if attributes is None or len(attributes) == 0:
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            if not _Matcher.wild_card_match(val, pattern):
+                return False
+        return True
