@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -23,10 +24,37 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        # Check for wildcards
+        if "*" not in pattern and "?" not in pattern:
+            return pattern == text
+
+        # Fast path for common wildcard patterns without '?'
+        if "?" not in pattern:
+            result = _Matcher._fast_wild_card_match(text, pattern)
+            if result is not None:
+                return result
+
+        # Fallback to regex with caching
+        return _Matcher._get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    def _fast_wild_card_match(text: str, pattern: str) -> bool:
+        # pattern*
+        if pattern.endswith("*") and "*" not in pattern[:-1]:
+            return text.startswith(pattern[:-1])
+        # *pattern
+        if pattern.startswith("*") and "*" not in pattern[1:]:
+            return text.endswith(pattern[1:])
+        # *pattern*
+        if len(pattern) >= 2 and pattern.startswith("*") and pattern.endswith("*") and "*" not in pattern[1:-1]:
+            return pattern[1:-1] in text
+        return None
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_compiled_regex(pattern: str) -> re.Pattern:
+        return re.compile(_Matcher.to_regex_pattern(pattern))
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
@@ -56,12 +84,9 @@ class _Matcher:
         if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            if key not in attributes:
+                return False
+            if not _Matcher.wild_card_match(attributes[key], pattern):
+                return False
+        return True
