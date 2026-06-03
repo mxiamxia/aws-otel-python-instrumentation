@@ -1,0 +1,3 @@
+## 2026-06-03 - [Optimization of Sampler Matcher]
+**Learning:** Hot paths like `_Matcher.wild_card_match` and `_Matcher.attribute_match` are called for every span during sampling. Implementing fast-paths for common wildcard patterns (prefix, suffix, middle) bypassing the regex engine, and caching regex compilation for complex patterns significantly reduces overhead. Furthermore, switching iteration in `attribute_match` to rule-based O(R) instead of span-based O(A) allows for early-returns and better performance as R << A.
+**Action:** Always check if iteration in filtering logic can be swapped to the smaller set of keys, and use `lru_cache` for repeated expensive string-to-regex conversions.
