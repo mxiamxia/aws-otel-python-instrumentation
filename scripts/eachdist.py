@@ -31,14 +31,12 @@ subprocess_run = subprocess.run
 
 
 def extraargs_help(calledcmd):
-    return cleandoc(
-        f"""
+    return cleandoc(f"""
         Additional arguments to pass on to  {calledcmd}.
 
         This is collected from any trailing arguments passed to `%(prog)s`.
         Use an initial `--` to separate them from regular arguments.
-        """
-    )
+        """)
 
 
 def parse_args(args=None):
@@ -56,8 +54,7 @@ def parse_args(args=None):
         "exec",
         help="Run a command for each or all targets.",
         formatter_class=argparse.RawTextHelpFormatter,
-        description=cleandoc(
-            """Run a command according to the `format` argument for each or all targets.
+        description=cleandoc("""Run a command according to the `format` argument for each or all targets.
 
         This is an advanced command that is used internally by other commands.
 
@@ -99,14 +96,12 @@ def parse_args(args=None):
           order of the glob expressions).
 
         After all this, any duplicate paths are removed (the first occurrence remains).
-        """
-        ),
+        """),
     )
     excparser.set_defaults(func=execute_args)
     excparser.add_argument(
         "format",
-        help=cleandoc(
-            """Format string for the command to execute.
+        help=cleandoc("""Format string for the command to execute.
 
         The available replacements depend on whether `--all` is specified.
         If `--all` was specified, there is only a single replacement,
@@ -136,16 +131,14 @@ def parse_args(args=None):
         If `--all` was specified, the resulting command is simply executed once.
         Otherwise, the command is executed for each found target. In both cases,
         the project root is the working directory.
-        """
-        ),
+        """),
     )
     excparser.add_argument(
         "--all",
         nargs="?",
         const=DEFAULT_ALLFMT,
         metavar="ALLFORMAT",
-        help=cleandoc(
-            """Instead of running the command for each target, join all target
+        help=cleandoc("""Instead of running the command for each target, join all target
         paths together to run a single command.
 
         This option optionally takes a format string to apply to each path. The
@@ -153,36 +146,29 @@ def parse_args(args=None):
         if `--all` was not specified.
 
         Default ALLFORMAT if this flag is specified: `%(const)s`.
-        """
-        ),
+        """),
     )
     excparser.add_argument(
         "--allsep",
-        help=cleandoc(
-            """Separator string for the strings resulting from `--all`.
+        help=cleandoc("""Separator string for the strings resulting from `--all`.
         Only valid if `--all` is specified.
-        """
-        ),
+        """),
     )
     excparser.add_argument(
         "--allowexitcode",
         type=int,
         action="append",
         default=[0],
-        help=cleandoc(
-            """The given command exit code is treated as success and does not abort execution.
+        help=cleandoc("""The given command exit code is treated as success and does not abort execution.
         Can be specified multiple times.
-        """
-        ),
+        """),
     )
     excparser.add_argument(
         "--mode",
         "-m",
         default="DEFAULT",
-        help=cleandoc(
-            """Section of config file to use for target selection configuration.
-        See description of exec for available options."""
-        ),
+        help=cleandoc("""Section of config file to use for target selection configuration.
+        See description of exec for available options."""),
     )
 
     instparser = subparsers.add_parser("install", help="Install all distributions.")

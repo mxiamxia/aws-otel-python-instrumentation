@@ -1,8 +1,10 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Utility module designed to support shared logic across AWS Span Processors."""
+
 import json
 import os
+import re
 from typing import Dict, List
 from urllib.parse import ParseResult, urlparse
 
@@ -22,6 +24,7 @@ LOCAL_ROOT: str = "LOCAL_ROOT"
 # Useful constants
 _AWS_LAMBDA_FUNCTION_NAME: str = "AWS_LAMBDA_FUNCTION_NAME"
 _BOTO3SQS_INSTRUMENTATION_SCOPE: str = "opentelemetry.instrumentation.boto3sqs"
+_BOTO3SQS_INSTRUMENTATION_SCOPE_CASEFOLDED: str = _BOTO3SQS_INSTRUMENTATION_SCOPE.casefold()
 
 # Max keyword length supported by parsing into remote_operation from DB_STATEMENT
 MAX_KEYWORD_LENGTH = 27
@@ -38,7 +41,7 @@ def _get_dialect_keywords() -> List[str]:
 
 
 # A regular expression pattern to match SQL keywords.
-SQL_KEYWORD_PATTERN = r"^(?:" + "|".join(_get_dialect_keywords()) + r")\b"
+SQL_KEYWORD_PATTERN = re.compile(r"^(?:" + "|".join(_get_dialect_keywords()) + r")\b")
 
 
 def get_ingress_operation(__, span: ReadableSpan) -> str:
@@ -141,7 +144,7 @@ def _is_boto3sqs_span(span: ReadableSpan) -> bool:
     return (
         instrumentation_scope is not None
         and instrumentation_scope.name is not None
-        and _BOTO3SQS_INSTRUMENTATION_SCOPE.casefold() == instrumentation_scope.name.casefold()
+        and _BOTO3SQS_INSTRUMENTATION_SCOPE_CASEFOLDED == instrumentation_scope.name.casefold()
     )
 
 

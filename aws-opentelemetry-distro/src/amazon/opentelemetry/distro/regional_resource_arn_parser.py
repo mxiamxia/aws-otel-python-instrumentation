@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from functools import lru_cache
+from typing import Optional, Tuple
 
 from amazon.opentelemetry.distro._utils import is_account_id
 
@@ -41,8 +42,11 @@ class RegionalResourceArnParser:
         return parts[-1] if parts else None
 
     @staticmethod
-    def _get_arn_parts(arn: str) -> Optional[list]:
+    @lru_cache(maxsize=1024)
+    def _get_arn_parts(arn: str) -> Optional[Tuple[str, ...]]:
         if not arn or not arn.startswith("arn"):
             return None
         parts = arn.split(":")
-        return parts if len(parts) >= 6 and is_account_id(parts[4]) else None
+        if len(parts) >= 6 and is_account_id(parts[4]):
+            return tuple(parts)
+        return None

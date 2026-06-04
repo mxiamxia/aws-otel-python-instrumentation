@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
+from typing import Optional
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -23,10 +25,36 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
+
+        # Fast-paths for common patterns
+        fast_path_result = _Matcher._try_fast_path_match(text, pattern)
+        if fast_path_result is not None:
+            return fast_path_result
+
         for char in pattern:
             if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
+                return _Matcher.compiled_regex_match(pattern, text)
         return pattern == text
+
+    @staticmethod
+    def _try_fast_path_match(text: str, pattern: str) -> Optional[bool]:
+        if "*" in pattern and "?" not in pattern:
+            # Check for prefix*
+            if pattern.endswith("*") and pattern.count("*") == 1:
+                return text.startswith(pattern[:-1])
+            # Check for *suffix
+            if pattern.startswith("*") and pattern.count("*") == 1:
+                return text.endswith(pattern[1:])
+            # Check for *middle*
+            if pattern.startswith("*") and pattern.endswith("*") and pattern.count("*") == 2:
+                return pattern[1:-1] in text
+        return None
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def compiled_regex_match(pattern: str, text: str) -> bool:
+        regex = re.compile(_Matcher.to_regex_pattern(pattern))
+        return regex.fullmatch(text) is not None
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
@@ -53,15 +81,12 @@ class _Matcher:
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
         if rule_attributes is None or len(rule_attributes) == 0:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if attributes is None or len(attributes) == 0:
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        # Optimized: Iterate over rule attributes O(R) and early-return on mismatch.
+        for key, pattern in rule_attributes.items():
+            text_to_match = attributes.get(key)
+            if text_to_match is None or not _Matcher.wild_card_match(text_to_match, pattern):
+                return False
+        return True

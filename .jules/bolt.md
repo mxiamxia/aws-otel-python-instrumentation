@@ -1,0 +1,3 @@
+## 2025-05-15 - [Optimization of Sampler and Resource Parsers]
+**Learning:** In telemetry hot paths like sampling and span processing, iterating over rule attributes (fixed set) instead of span attributes (variable/large set) allows for early-return and significantly better performance. Additionally, simple string slicing is much faster than regex or `.replace()` for known fixed-length protocol stripping.
+**Action:** Always check the relative size of compared sets in matching logic and prioritize iterating over the smaller, fixed set of rules. Use `lru_cache` for repetitive string parsing like ARNs and URLs.
