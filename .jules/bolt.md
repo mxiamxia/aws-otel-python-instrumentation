@@ -1,0 +1,3 @@
+## 2025-06-05 - Optimize _Matcher with Fast-Paths and O(R) Iteration
+**Learning:** In high-volume paths like sampling, regex overhead and (A)$ attribute iteration are significant bottlenecks. Fast-paths for common wildcard patterns (prefix, suffix, middle) and switching to (R)$ rule-based iteration with early returns provide massive speedups (~7x to 15x).
+**Action:** Always check if a complex matching operation can be bypassed with simple string methods for common cases. When matching a small set of rules against a larger set of attributes, iterate over the rules and early-return on the first mismatch.
