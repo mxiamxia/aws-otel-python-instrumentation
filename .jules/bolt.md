@@ -1,0 +1,3 @@
+## 2026-06-06 - Optimized _Matcher for X-Ray Sampler
+**Learning:** Complexity of `attribute_match` was O(A) where A is the number of span attributes, which can be large. Changing it to iterate over rule attributes O(R) and implementing early return significantly improves performance, as R is typically small. Additionally, regex compilation in `wild_card_match` is expensive; caching it with `lru_cache` and providing fast-paths for common glob patterns (`prefix*`, `*suffix`, `*middle*`) provides substantial speedups (~4x to 15x depending on input).
+**Action:** Always check if iteration can be performed over the smaller set of keys in matching logic. Implement fast-paths for common string patterns to bypass regex engines.
