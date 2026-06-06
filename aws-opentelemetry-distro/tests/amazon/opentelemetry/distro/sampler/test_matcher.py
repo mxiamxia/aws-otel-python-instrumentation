@@ -19,6 +19,7 @@ class TestMatcher(TestCase):
             ["HelloWorld", "Hell?W*d"],
             ["Hello.World", "*.World"],
             ["Bye.World", "*.World"],
+            ["axby", "*a*b*"],
         ]
         for test_case in test_cases:
             self.assertTrue(_Matcher.wild_card_match(text=test_case[0], pattern=test_case[1]))
