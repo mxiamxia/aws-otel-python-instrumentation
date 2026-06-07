@@ -4,6 +4,7 @@
 """
 Patches for OpenTelemetry Pika instrumentation to add code correlation support.
 """
+
 # pylint: disable=duplicate-code
 
 import functools

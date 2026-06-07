@@ -82,7 +82,7 @@ if path is None:
     raise HandlerError("ORIG_HANDLER is not defined.")
 
 try:
-    (mod_name, handler_name) = path.rsplit(".", 1)
+    mod_name, handler_name = path.rsplit(".", 1)
 except ValueError as e:
     raise HandlerError("Bad path '{}' for ORIG_HANDLER: {}".format(path, str(e)))
 
