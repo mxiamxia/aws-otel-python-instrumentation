@@ -6,6 +6,7 @@ Code correlation module for AWS OpenTelemetry Python Instrumentation.
 
 This module provides functionality for correlating code execution with telemetry data.
 """
+
 # Import code attributes span processor
 from .code_attributes_span_processor import CodeAttributesSpanProcessor
 
