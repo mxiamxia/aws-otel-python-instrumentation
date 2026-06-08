@@ -1,5 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 from amazon.opentelemetry.distro._utils import is_account_id
@@ -40,6 +41,7 @@ class SqsUrlParser:
         return SqsUrlParser.parse_url(url)[2]
 
     @staticmethod
+    @lru_cache(maxsize=1024)
     def parse_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parses an SQS URL and extracts its components.
