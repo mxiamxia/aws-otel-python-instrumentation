@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -16,16 +17,33 @@ cloud_platform_mapping = {
 
 class _Matcher:
     @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_compiled_regex(pattern: str):
+        return re.compile(_Matcher.to_regex_pattern(pattern))
+
+    @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
         if pattern == "*":
             return True
         if text is None or pattern is None:
             return False
-        if len(pattern) == 0:
-            return len(text) == 0
+        if not pattern:
+            return not text
+
+        # Fast path for common wildcard patterns
+        if "?" not in pattern:
+            wildcard_count = pattern.count("*")
+            if wildcard_count == 1:
+                if pattern.endswith("*"):
+                    return text.startswith(pattern[:-1])
+                if pattern.startswith("*"):
+                    return text.endswith(pattern[1:])
+            elif wildcard_count == 2 and pattern.startswith("*") and pattern.endswith("*"):
+                return pattern[1:-1] in text
+
         for char in pattern:
             if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
+                return _Matcher._get_compiled_regex(pattern).fullmatch(text) is not None
         return pattern == text
 
     @staticmethod
@@ -51,17 +69,15 @@ class _Matcher:
 
     @staticmethod
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
-        if rule_attributes is None or len(rule_attributes) == 0:
+        if not rule_attributes:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if not attributes or len(rule_attributes) > len(attributes):
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            if not _Matcher.wild_card_match(str(val), pattern):
+                return False
+        return True
