@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Utility module holding attribute keys with special meaning to AWS components"""
+
 AWS_SPAN_KIND: str = "aws.span.kind"
 AWS_LOCAL_SERVICE: str = "aws.local.service"
 AWS_LOCAL_OPERATION: str = "aws.local.operation"

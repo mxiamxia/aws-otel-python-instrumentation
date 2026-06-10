@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # pylint: skip-file
 """Django's command-line utility for administrative tasks."""
+
 import os
 import sys
 
