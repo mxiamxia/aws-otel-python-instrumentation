@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Utility module designed to support shared logic across AWS Span Processors."""
+
 import json
 import os
 from typing import Dict, List

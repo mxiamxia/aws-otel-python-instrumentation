@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import re
+from typing import Any
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -23,13 +25,30 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        star_count = pattern.count("*")
+        question_count = pattern.count("?")
+
+        if star_count == 0 and question_count == 0:
+            return pattern == text
+
+        if star_count == 1 and question_count == 0:
+            return _Matcher._single_star_match(text, pattern)
+
+        return _Matcher.to_regex_pattern(pattern).fullmatch(text) is not None
 
     @staticmethod
-    def to_regex_pattern(rule_pattern: str) -> str:
+    def _single_star_match(text: str, pattern: str) -> bool:
+        if pattern.startswith("*"):
+            return text.endswith(pattern[1:])
+        if pattern.endswith("*"):
+            return text.startswith(pattern[:-1])
+        parts = pattern.split("*")
+        return len(text) >= (len(parts[0]) + len(parts[1])) and text.startswith(parts[0]) and text.endswith(parts[1])
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1024)
+    def to_regex_pattern(rule_pattern: str) -> Any:
         token_start = -1
         regex_pattern = ""
         for index, char in enumerate(rule_pattern):
@@ -47,7 +66,7 @@ class _Matcher:
                     token_start = index
         if token_start != -1:
             regex_pattern += re.escape(rule_pattern[token_start:])
-        return regex_pattern
+        return re.compile(regex_pattern)
 
     @staticmethod
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
@@ -56,12 +75,10 @@ class _Matcher:
         if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            if not _Matcher.wild_card_match(str(val), pattern):
+                return False
+        return True
