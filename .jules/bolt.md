@@ -1,0 +1,3 @@
+## 2026-06-13 - [Optimized _Matcher for Sampling]
+**Learning:** Iterating over span attributes ((A)$) in the sampling hot path is inefficient when the number of rules ((R)$) is typically much smaller. Additionally, regex matching in Python has significant overhead compared to simple string operations for common wildcard patterns.
+**Action:** Always prefer iterating over rule keys ((R)$) with early-return for attribute matching. Implement fast-paths for common wildcard patterns (`*`, `prefix*`, `*suffix`, `*middle*`) and use `functools.lru_cache` for compiled regex objects to minimize overhead in hot paths.
