@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -23,12 +24,12 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
+        if "*" in pattern or "?" in pattern:
+            return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
         return pattern == text
 
     @staticmethod
+    @lru_cache(maxsize=1024)
     def to_regex_pattern(rule_pattern: str) -> str:
         token_start = -1
         regex_pattern = ""
@@ -53,15 +54,14 @@ class _Matcher:
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
         if rule_attributes is None or len(rule_attributes) == 0:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if attributes is None or len(attributes) == 0:
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            # Ensure value is converted to string for matching
+            if not _Matcher.wild_card_match(str(val), pattern):
+                return False
+        return True
