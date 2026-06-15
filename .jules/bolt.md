@@ -1,0 +1,3 @@
+## 2026-06-15 - [Optimization of Sampler Matcher]
+**Learning:** In performance-critical hot paths like sampling, iterating over the smaller set (rule attributes, $O(R)$) instead of the larger set (span attributes, $O(A)$) and using early returns provides massive speedups (~4x-15x). Additionally, regex compilation is a bottleneck that can be mitigated with `lru_cache` and string-based fast-paths for common wildcard patterns.
+**Action:** Always prioritize $O(R)$ iteration and early returns in matching logic. Use `lru_cache` for regex compilation and implement `startswith`/`endswith` fast-paths for wildcard matching. Refactor complex matching into helper methods to avoid Pylint 'too many return statements' (R0911) errors.
