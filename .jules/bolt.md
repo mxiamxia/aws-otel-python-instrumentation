@@ -1,0 +1,3 @@
+## 2026-06-17 - [Optimization of _Matcher in sampling path]
+**Learning:** Switching from iterating over span attributes $O(A)$ to rule attributes $O(R)$ in the sampling matcher provides a significant performance boost (~4x to 15x) because spans typically have many more attributes than sampling rules. Additionally, regex compilation is expensive even with `fullmatch`, so fast-paths for common wildcard patterns (prefix, suffix, contains) and `lru_cache` for the remaining regexes are critical in hot paths.
+**Action:** In telemetry filtering or sampling logic, always iterate over the smaller set of keys (usually rules) and use string fast-paths before falling back to regex.
