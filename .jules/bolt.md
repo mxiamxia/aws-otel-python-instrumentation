@@ -1,0 +1,3 @@
+## 2025-05-15 - [Optimization of _Matcher in Sampling Path]
+**Learning:** In performance-critical paths like OpenTelemetry sampling, iterating over the smaller set of keys (rule attributes, O(R)) instead of the larger set (span attributes, O(A)) and using dictionary lookups significantly improves performance. Additionally, bypassing the regex engine with string-based fast-paths for common wildcard patterns (prefix, suffix, containment) provides a substantial speedup.
+**Action:** Always prefer O(rules) over O(attributes) in filtering logic and implement string-method fast-paths before falling back to regex.
