@@ -1,0 +1,3 @@
+## 2026-06-27 - Caching and Regex Optimization for AWS Resource Parsing
+**Learning:** Adding `lru_cache` to frequently called string parsing functions (ARNs, SQS URLs) provides a significant performance boost (~5-11x) as telemetry often contains repetitive resource identifiers. Pre-compiling large regex patterns for SQL keyword matching also improves efficiency, but it's critical to ensure the match results maintain expected casing (e.g., `.upper()`) if the subsequent logic expects a specific format.
+**Action:** Apply `lru_cache` to utility parsing functions and pre-compile regex patterns at the module level. Always verify that optimized string transformations (like matching and extracting) preserve the original expected output format to avoid regressions.

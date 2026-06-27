@@ -1,11 +1,18 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
+import re
 from typing import List, Optional, Tuple
 
 from amazon.opentelemetry.distro._utils import is_account_id
 
 _HTTP_SCHEMA: str = "http://"
 _HTTPS_SCHEMA: str = "https://"
+
+# Regular expression to validate SQS queue names.
+# SQS queue names can contain alphanumeric characters, hyphens, and underscores,
+# and have a maximum length of 80 characters.
+_QUEUE_NAME_REGEX = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
 
 
 class SqsUrlParser:
@@ -40,6 +47,7 @@ class SqsUrlParser:
         return SqsUrlParser.parse_url(url)[2]
 
     @staticmethod
+    @functools.lru_cache(maxsize=1024)
     def parse_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parses an SQS URL and extracts its components.
@@ -65,11 +73,7 @@ class SqsUrlParser:
 
 
 def _is_valid_queue_name(input_str: str) -> bool:
-    if input_str is None or len(input_str) == 0 or len(input_str) > 80:
+    if input_str is None:
         return False
 
-    for char in input_str:
-        if char != "_" and char != "-" and not char.isalpha() and not char.isdigit():
-            return False
-
-    return True
+    return bool(_QUEUE_NAME_REGEX.match(input_str))
