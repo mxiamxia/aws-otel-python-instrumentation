@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -21,12 +22,40 @@ class _Matcher:
             return True
         if text is None or pattern is None:
             return False
-        if len(pattern) == 0:
+
+        pattern_len = len(pattern)
+        if pattern_len == 0:
             return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+
+        # Fast path for common patterns without '?'
+        if "?" not in pattern:
+            star_count = pattern.count("*")
+            if star_count == 0:
+                return pattern == text
+            if star_count == 1:
+                if pattern[0] == "*":
+                    return text.endswith(pattern[1:])
+                if pattern[pattern_len - 1] == "*":
+                    return text.startswith(pattern[: pattern_len - 1])
+                # prefix*suffix
+                parts = pattern.split("*")
+                prefix, suffix = parts[0], parts[1]
+                return (
+                    len(text) >= (pattern_len - 1)
+                    and text.startswith(prefix)
+                    and text.endswith(suffix)
+                )
+            if star_count == 2 and pattern[0] == "*" and pattern[pattern_len - 1] == "*":
+                # *middle*
+                return pattern[1 : pattern_len - 1] in text
+
+        # Regex path for complex patterns or those with '?'
+        return _Matcher._get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_compiled_regex(pattern: str):
+        return re.compile(_Matcher.to_regex_pattern(pattern))
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
