@@ -1,0 +1,3 @@
+## 2026-07-02 - Optimized Wildcard and Attribute Matching
+**Learning:** Fast-path string operations (`startswith`, `endswith`, `in`) are significantly faster than regex for simple wildcards (`prefix*`, `*suffix`, `*middle*`) in hot paths like the sampler's `wild_card_match`. Additionally, in `attribute_match`, iterating over the set of rules instead of all span attributes is more efficient because spans typically have many more attributes than there are sampling rules.
+**Action:** Always check if a complex matching operation can be decomposed into fast-paths for common cases. When comparing two sets of data where one is typically much smaller (rules vs. data), iterate over the smaller set.
