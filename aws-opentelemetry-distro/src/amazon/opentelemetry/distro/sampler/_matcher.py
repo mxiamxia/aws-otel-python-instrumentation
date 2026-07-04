@@ -1,6 +1,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
+from typing import Optional
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -17,16 +19,39 @@ cloud_platform_mapping = {
 class _Matcher:
     @staticmethod
     def wild_card_match(text: str = None, pattern: str = None) -> bool:
+        """
+        Matches text against a pattern which can include wildcards '*' and '?'.
+        '*' matches any number of characters, and '?' matches exactly one character.
+        """
         if pattern == "*":
             return True
         if text is None or pattern is None:
             return False
-        if len(pattern) == 0:
-            return len(text) == 0
-        for char in pattern:
-            if char in ("*", "?"):
-                return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
-        return pattern == text
+        if not pattern:
+            return not text
+
+        # Fast path for patterns without wildcards
+        if "*" not in pattern and "?" not in pattern:
+            return text == pattern
+
+        # Fast path for simple wildcards
+        if "?" not in pattern:
+            wildcard_count = pattern.count("*")
+            if wildcard_count == 1:
+                if pattern.endswith("*"):  # prefix*
+                    return text.startswith(pattern[:-1])
+                if pattern.startswith("*"):  # *suffix
+                    return text.endswith(pattern[1:])
+            elif wildcard_count == 2 and pattern.startswith("*") and pattern.endswith("*"):  # *substring*
+                return pattern[1:-1] in text
+
+        # Fallback to regex for complex patterns
+        return _Matcher._get_compiled_regex(pattern).fullmatch(text) is not None
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_compiled_regex(pattern: str) -> re.Pattern:
+        return re.compile(_Matcher.to_regex_pattern(pattern))
 
     @staticmethod
     def to_regex_pattern(rule_pattern: str) -> str:
@@ -51,17 +76,20 @@ class _Matcher:
 
     @staticmethod
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
-        if rule_attributes is None or len(rule_attributes) == 0:
+        """
+        Checks if all rule_attributes are present in attributes and match their respective patterns.
+        """
+        if not rule_attributes:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if not attributes or len(rule_attributes) > len(attributes):
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            # Ensure val is treated as a string for wildcard matching
+            if not _Matcher.wild_card_match(str(val), pattern):
+                return False
+
+        return True
