@@ -339,8 +339,8 @@ def _get_db_statement_remote_operation(span: ReadableSpan, statement_key: str) -
     # Remove all whitespace and newline characters from the beginning of remote_operation
     # and retrieve the first MAX_KEYWORD_LENGTH characters
     remote_operation = remote_operation.lstrip()[:MAX_KEYWORD_LENGTH]
-    match: Optional[Match[str]] = re.match(SQL_KEYWORD_PATTERN, remote_operation.upper())
-    remote_operation = match.group(0) if match else UNKNOWN_REMOTE_OPERATION
+    match: Optional[Match[str]] = SQL_KEYWORD_PATTERN.match(remote_operation)
+    remote_operation = match.group(0).upper() if match else UNKNOWN_REMOTE_OPERATION
 
     return remote_operation
 
