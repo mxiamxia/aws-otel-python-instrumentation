@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 import re
+from functools import lru_cache
 
 from opentelemetry.semconv.resource import CloudPlatformValues
 from opentelemetry.util.types import Attributes
@@ -23,12 +24,25 @@ class _Matcher:
             return False
         if len(pattern) == 0:
             return len(text) == 0
+
+        # Fast paths for common wildcard patterns to avoid regex overhead
+        if "?" not in pattern:
+            star_count = pattern.count("*")
+            if star_count == 1:
+                if pattern.endswith("*"):
+                    return text.startswith(pattern[:-1])
+                if pattern.startswith("*"):
+                    return text.endswith(pattern[1:])
+            elif star_count == 2 and pattern.startswith("*") and pattern.endswith("*"):
+                return pattern[1:-1] in text
+
         for char in pattern:
             if char in ("*", "?"):
                 return re.fullmatch(_Matcher.to_regex_pattern(pattern), text) is not None
         return pattern == text
 
     @staticmethod
+    @lru_cache(maxsize=1024)
     def to_regex_pattern(rule_pattern: str) -> str:
         token_start = -1
         regex_pattern = ""
@@ -51,17 +65,18 @@ class _Matcher:
 
     @staticmethod
     def attribute_match(attributes: Attributes = None, rule_attributes: dict = None) -> bool:
-        if rule_attributes is None or len(rule_attributes) == 0:
+        if not rule_attributes:
             return True
-        if attributes is None or len(attributes) == 0 or len(rule_attributes) > len(attributes):
+        if not attributes:
             return False
 
-        matched_count = 0
-        for key, val in attributes.items():
-            text_to_match = val
-            pattern = rule_attributes.get(key, None)
-            if pattern is None:
-                continue
-            if _Matcher.wild_card_match(text_to_match, pattern):
-                matched_count += 1
-        return matched_count == len(rule_attributes)
+        # Iterate over rule attributes instead of span attributes for better performance.
+        # This allows early return on the first mismatch.
+        for key, pattern in rule_attributes.items():
+            val = attributes.get(key)
+            if val is None:
+                return False
+            # Ensure text is a string as wild_card_match expects string input
+            if not _Matcher.wild_card_match(str(val), pattern):
+                return False
+        return True
